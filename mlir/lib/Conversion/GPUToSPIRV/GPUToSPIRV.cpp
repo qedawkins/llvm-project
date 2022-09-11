@@ -146,11 +146,14 @@ LogicalResult LaunchConfigConversion<SourceOp, builtin>::matchAndRewrite(
   auto indexType = typeConverter->getIndexType();
 
   // SPIR-V invocation builtin variables are a vector of type <3xi32>
+  auto i64Type = rewriter.getIntegerType(64);
   auto spirvBuiltin =
-      spirv::getBuiltinVariableValue(op, builtin, indexType, rewriter);
-  rewriter.replaceOpWithNewOp<spirv::CompositeExtractOp>(
-      op, indexType, spirvBuiltin,
+      spirv::getBuiltinVariableValue(op, builtin, i64Type, rewriter);
+  auto spirvBuiltinExt = rewriter.create<spirv::CompositeExtractOp>(
+      op.getLoc(), i64Type, spirvBuiltin,
       rewriter.getI32ArrayAttr({static_cast<int32_t>(op.dimension())}));
+  rewriter.replaceOpWithNewOp<spirv::SConvertOp>(
+      op, indexType, spirvBuiltinExt);
   return success();
 }
 

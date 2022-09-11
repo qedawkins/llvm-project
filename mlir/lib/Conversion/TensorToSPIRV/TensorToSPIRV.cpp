@@ -73,8 +73,9 @@ public:
       // initialization.
       varOp = rewriter.create<spirv::VariableOp>(loc, varType,
                                                  spirv::StorageClass::Function,
-                                                 /*initializer=*/nullptr);
-      rewriter.create<spirv::StoreOp>(loc, varOp, adaptor.getTensor());
+                                                 /*initializer=*/adaptor.getTensor());
+
+      //rewriter.create<spirv::StoreOp>(loc, varOp, adaptor.getTensor());
     } else {
       // Need to store the value to the local variable. It's questionable
       // whether we want to support such case though.

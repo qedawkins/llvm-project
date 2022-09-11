@@ -778,6 +778,8 @@ spirv::PtrAccessChainOp mlir::spirv::getElementPtrDirect(
     linearIndex =
         linearizeIndex(indices, strides, offset, indexType, loc, builder);
   }
+  auto i64Type = builder.getIntegerType(64);
+  linearIndex = builder.create<spirv::SConvertOp>(loc, i64Type, linearIndex);
   return builder.create<spirv::PtrAccessChainOp>(loc, basePtr, linearIndex,
                                                  linearizedIndices);
 }
