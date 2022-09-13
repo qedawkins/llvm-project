@@ -88,7 +88,7 @@ public:
     Value index = spirv::linearizeIndex(adaptor.getIndices(), strides,
                                         /*offset=*/0, indexType, loc, rewriter);
     auto i64Type = rewriter.getIntegerType(64);
-    Value indexProm = rewriter.create<spirv::SConvertOp>(loc, i64Type, index);
+    Value indexProm = rewriter.create<spirv::UConvertOp>(loc, i64Type, index);
     auto acOp = rewriter.create<spirv::AccessChainOp>(loc, varOp, indexProm);
 
     rewriter.replaceOpWithNewOp<spirv::LoadOp>(extractOp, acOp);
