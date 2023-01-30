@@ -402,7 +402,8 @@ LogicalResult Serializer::prepareBasicType(
     // to preserve or validate.
     // 0 indicates unsigned, or no signedness semantics
     // 1 indicates signed semantics."
-    operands.push_back(intType.isSigned() ? 1 : 0);
+    operands.push_back(intType.isUnsigned() ? 0 : 1);
+    //operands.push_back(intType.isSigned() ? 1 : 0);
     return success();
   }
 
