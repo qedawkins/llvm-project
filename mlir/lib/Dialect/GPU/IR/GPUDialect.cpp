@@ -74,7 +74,8 @@ Type MMAMatrixType::getElementType() const { return getImpl()->elementType; }
 StringRef MMAMatrixType::getOperand() const { return getImpl()->getOperand(); }
 
 bool MMAMatrixType::isValidElementType(Type elementType) {
-  return elementType.isF16() || elementType.isF32();
+  return elementType.isF16() || elementType.isF32() ||
+      elementType.isInteger(8) || elementType.isInteger(32);
 }
 
 LogicalResult
@@ -89,7 +90,7 @@ MMAMatrixType::verify(function_ref<InFlightDiagnostic()> emitError,
     return emitError() << "MMAMatrixType must have exactly two dimensions";
 
   if (!MMAMatrixType::isValidElementType(elementType))
-    return emitError() << "MMAMatrixType elements must be F16 or F32";
+    return emitError() << "MMAMatrixType elements must be F16, F32, I8, or I32";
 
   return success();
 }

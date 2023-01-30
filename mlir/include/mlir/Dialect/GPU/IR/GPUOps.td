@@ -1201,7 +1201,7 @@ def GPU_SubgroupMmaStoreMatrixOp : GPU_Op<"subgroup_mma_store_matrix",
     ```
   }];
 
-  let arguments = (ins Arg<MMAMatrixOf<[F16, F32]>>:$src,
+  let arguments = (ins Arg<MMAMatrixOf<[I8, I32, F16, F32]>>:$src,
                   Arg<GPU_MMAMemRef, "",[MemWrite]>:$dstMemref,
                   Variadic<Index>:$indices,
                   IndexAttr:$leadDimension,
@@ -1244,9 +1244,9 @@ def GPU_SubgroupMmaComputeOp
     ```
   }];
 
-  let arguments = (ins Arg<MMAMatrixOf<[F16, F32]>>:$opA,
-                  Arg<MMAMatrixOf<[F16, F32]>>:$opB,
-                  Arg<MMAMatrixOf<[F16, F32]>>:$opC,
+  let arguments = (ins Arg<MMAMatrixOf<[I8, F16, F32]>>:$opA,
+                  Arg<MMAMatrixOf<[I8, F16, F32]>>:$opB,
+                  Arg<MMAMatrixOf<[I32, F16, F32]>>:$opC,
                   OptionalAttr<UnitAttr>:$a_transpose,
                   OptionalAttr<UnitAttr>:$b_transpose);
 
@@ -1288,7 +1288,7 @@ def GPU_SubgroupMmaConstantMatrixOp : GPU_Op<"subgroup_mma_constant_matrix",
     ```
   }];
 
-  let arguments = (ins AnyTypeOf<[F16, F32]>:$value);
+  let arguments = (ins AnyTypeOf<[I8, I32, F16, F32]>:$value);
 
   let results = (outs GPU_MMAMatrix:$res);
 
