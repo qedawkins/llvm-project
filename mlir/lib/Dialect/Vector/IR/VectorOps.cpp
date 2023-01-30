@@ -4933,6 +4933,25 @@ OpFoldResult BitCastOp::fold(FoldAdaptor adaptor) {
     }
   }
 
+  if (auto intPack = sourceConstant.dyn_cast<DenseIntElementsAttr>()) {
+    if (intPack.isSplat()) {
+      auto splat = intPack.getSplatValue<IntegerAttr>();
+
+      // Casting int8 into int32.
+      if (srcElemType.isInteger(8) && dstElemType.isInteger(32)) {
+        uint32_t bits = static_cast<uint32_t>(
+            splat.getValue().getZExtValue());
+        // Duplicate the 16-bit pattern.
+        bits = (bits << 24 & 0xff000000) |
+               (bits << 16 & 0x00ff0000) |
+               (bits << 8 & 0x0000ff00) |
+               (bits & 0x0000ff);
+        APInt intBits(32, bits);
+        return DenseElementsAttr::get(getResultVectorType(), intBits);
+      }
+    }
+  }
+
   return {};
 }
 
