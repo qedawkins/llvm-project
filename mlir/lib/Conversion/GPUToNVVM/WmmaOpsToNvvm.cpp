@@ -57,6 +57,12 @@ static NVVM::MMATypes getElementType(gpu::MMAMatrixType type) {
   if (type.getElementType().isF32())
     return type.getOperand().equals("COp") ? NVVM::MMATypes::f32
                                            : NVVM::MMATypes::tf32;
+
+  if (type.getElementType().isSignedInteger(8))
+    return NVVM::MMATypes::s8;
+  // Accumulator type is signless and implies signed.
+  if (type.getElementType().isInteger(32))
+    return NVVM::MMATypes::s32;
   llvm_unreachable("Unsupported type");
 }
 
