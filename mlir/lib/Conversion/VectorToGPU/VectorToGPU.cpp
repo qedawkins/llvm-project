@@ -143,7 +143,9 @@ static bool transferReadSupportsMMAMatrixType(vector::TransferReadOp readOp,
 
   // Only allow integer types if the signedness can be inferred.
   if (!useNvGpu && readOp.getVectorType().getElementType().isInteger(8))
-    if (!readOp->hasOneUse() || !isa<arith::ExtSIOp>(*readOp->user_begin()))
+    if (!readOp->hasOneUse() ||
+            (!isa<arith::ExtSIOp>(*readOp->user_begin()) &&
+            !isa<arith::ExtUIOp>(*readOp->user_begin())))
       return false;
 
   AffineMap map = readOp.getPermutationMap();
@@ -194,8 +196,9 @@ static bool broadcastSupportsMMAMatrixType(vector::BroadcastOp broadcastOp) {
   return broadcastOp.getVectorType().getRank() == 2;
 }
 
-/// Return true if this signed extend op can be folded into a contract op.
-static bool signedExtendSupportsMMAMatrixType(arith::ExtSIOp extOp) {
+/// Return true if this integer extend op can be folded into a contract op.
+template <typename ExtOpTy>
+static bool integerExtendSupportsMMAMatrixType(ExtOpTy extOp) {
   if (!isa<vector::TransferReadOp>(extOp.getOperand().getDefiningOp()))
     return false;
   return llvm::all_of(extOp->getUsers(), [](Operation *user) {
@@ -282,8 +285,10 @@ static bool supportsMMaMatrixType(Operation *op, bool useNvGpu) {
     return constantSupportsMMAMatrixType(constant);
   if (auto broadcast = dyn_cast<vector::BroadcastOp>(op))
     return broadcastSupportsMMAMatrixType(broadcast);
-  if (auto extend = dyn_cast<arith::ExtSIOp>(op))
-    return signedExtendSupportsMMAMatrixType(extend);
+  if (auto signedExtend = dyn_cast<arith::ExtSIOp>(op))
+    return integerExtendSupportsMMAMatrixType<arith::ExtSIOp>(signedExtend);
+  if (auto unsignedExtend = dyn_cast<arith::ExtUIOp>(op))
+    return integerExtendSupportsMMAMatrixType<arith::ExtUIOp>(unsignedExtend);
   return elementwiseSupportsMMAMatrixType(op);
 }
 
@@ -429,10 +434,11 @@ struct CombineTransferReadOpTranspose final
                                 PatternRewriter &rewriter) const override {
     // Look through integer extend ops.
     Value source = op.getVector();
-    auto extOp = source.getDefiningOp<arith::ExtSIOp>();
     auto resultType = op.getVectorType();
-    if (extOp) {
-      source = extOp.getOperand();
+    Operation *extOp;
+    if ((extOp = source.getDefiningOp<arith::ExtSIOp>()) ||
+            (extOp = source.getDefiningOp<arith::ExtUIOp>())) {
+      source = extOp->getOperand(0);
       resultType =
           VectorType::get(resultType.getShape(),
                           source.getType().cast<VectorType>().getElementType());
@@ -469,9 +475,14 @@ struct CombineTransferReadOpTranspose final
             .getResult();
 
     // Fuse through the integer extend op.
-    if (extOp)
-      result = rewriter.create<arith::ExtSIOp>(loc, op.getType(), result)
-                   .getResult();
+    if (extOp) {
+      if (isa<arith::ExtSIOp>(extOp))
+        result = rewriter.create<arith::ExtSIOp>(loc, op.getType(), result)
+                     .getResult();
+      else
+        result = rewriter.create<arith::ExtUIOp>(loc, op.getType(), result)
+                     .getResult();
+    }
 
     rewriter.replaceOp(op, result);
     return success();
@@ -521,12 +532,18 @@ static void convertTransferReadOp(vector::TransferReadOp op,
   auto elType = op.getVectorType().getElementType();
   const char *fragType = inferFragType(op);
   if (op->hasOneUse()) {
-    auto extOp = dyn_cast<arith::ExtSIOp>(*op->user_begin());
     // Infer the signedness of the mma type from the signed extend.
-    if (extOp) {
+    if (auto extOp = dyn_cast<arith::ExtSIOp>(*op->user_begin())) {
       elType = IntegerType::get(op.getContext(),
                                 elType.cast<IntegerType>().getWidth(),
                                 IntegerType::Signed);
+      mappingResult = extOp.getResult();
+      fragType = inferFragType(extOp);
+    }
+    if (auto extOp = dyn_cast<arith::ExtUIOp>(*op->user_begin())) {
+      elType = IntegerType::get(op.getContext(),
+                                elType.cast<IntegerType>().getWidth(),
+                                IntegerType::Unsigned);
       mappingResult = extOp.getResult();
       fragType = inferFragType(extOp);
     }
