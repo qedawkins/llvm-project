@@ -29,22 +29,22 @@ transform::GetParentForOp::apply(transform::TransformResults &results,
                                  transform::TransformState &state) {
   SetVector<Operation *> parents;
   for (Operation *target : state.getPayloadOps(getTarget())) {
-    Operation *loop, *current = target;
+    Operation *loop = target;
     for (unsigned i = 0, e = getNumLoops(); i < e; ++i) {
-      loop = getAffine()
-                 ? current->getParentOfType<AffineForOp>().getOperation()
-                 : current->getParentOfType<scf::ForOp>().getOperation();
+      while ((loop = loop->getParentOp()))
+        if ((!getCheckInterface() || isa<LoopLikeOpInterface>(loop)) && (!getLoopOp().has_value() || *getLoopOp() == loop->getName().getStringRef()))
+          break;
       if (!loop) {
         DiagnosedSilenceableFailure diag =
             emitSilenceableError()
-            << "could not find an '"
-            << (getAffine() ? AffineForOp::getOperationName()
-                            : scf::ForOp::getOperationName())
-            << "' parent";
+            << "could not find "
+            << getNumLoops()
+            << " parent loops";
+        if (getLoopOp().has_value())
+          diag << " of type '" << *getLoopOp() << "'";
         diag.attachNote(target->getLoc()) << "target op";
         return diag;
       }
-      current = loop;
     }
     parents.insert(loop);
   }

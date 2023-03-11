@@ -34,7 +34,8 @@ def GetParentForOp : Op<Transform_Dialect, "loop.get_parent_for",
     (ins TransformHandleTypeInterface:$target,
          DefaultValuedAttr<ConfinedAttr<I64Attr, [IntPositive]>,
                            "1">:$num_loops,
-         DefaultValuedAttr<BoolAttr, "false">:$affine);
+         DefaultValuedAttr<BoolAttr, "true">:$check_interface,
+         OptionalAttr<StrAttr>:$loop_op);
   let results = (outs TransformHandleTypeInterface : $parent);
 
   let assemblyFormat =
