@@ -34,9 +34,16 @@ struct ElementwiseOpPattern : public OpConversionPattern<Op> {
     }
 
     if (SPIRVOp::template hasTrait<OpTrait::spirv::UnsignedOp>() &&
-        !op.getType().isIndex() && dstType != op.getType()) {
-      return op.emitError(
-          "bitwidth emulation is not implemented yet on unsigned op");
+        !op.getType().isIndex() &&
+        (op.getType().template isa<VectorType>() &&
+         !op.getType()
+              .template cast<VectorType>()
+              .getElementType()
+              .isIndex()) &&
+        dstType != op.getType()) {
+      op.dump();
+      return op.emitError("bitwidth emulation is not implemented yet on "
+                          "unsigned op pattern version");
     }
     rewriter.template replaceOpWithNewOp<SPIRVOp>(op, dstType,
                                                   adaptor.getOperands());
