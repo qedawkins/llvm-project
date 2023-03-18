@@ -1016,5 +1016,63 @@ std::optional<TypedAttr> getNeutralElement(Operation *op) {
   return std::nullopt;
 }
 
+/// Swaps the uses of the left and right hand input arguments of the given generic op.
+void swapGenericBinaryInputArgs(linalg::GenericOp genericOp) {
+  Value leftOperand = genericOp.getRegion().front().getArgument(0);
+  Value rightOperand = genericOp.getRegion().front().getArgument(1);
+  auto leftUses = leftOperand.getUses();
+  auto rightUses = rightOperand.getUses();
+  leftOperand.replaceUsesWithIf(rightOperand, [&](OpOperand &use) {
+    return llvm::any_of(leftUses, [&](OpOperand &newUse) {
+              return newUse.getOwner() == use.getOwner() &&
+                    newUse.getOperandNumber() == use.getOperandNumber();
+            });
+  });
+  rightOperand.replaceUsesWithIf(leftOperand, [&](OpOperand &use) {
+    return llvm::any_of(rightUses, [&](OpOperand &newUse) {
+              return newUse.getOwner() == use.getOwner() &&
+                    newUse.getOperandNumber() == use.getOperandNumber();
+            });
+  });
+  llvm::SmallDenseSet<Operation *, 2> leftOps;
+  llvm::SmallDenseSet<Operation *, 2> rightOps;
+  for (Operation *user : leftOperand.getUsers())
+    leftOps.insert(user);
+  for (Operation *user : rightOperand.getUsers())
+    rightOps.insert(user);
+
+  for (Operation &op : genericOp.getRegion().front()) {
+    if (leftOps.contains(&op) || rightOps.contains(&op))
+      continue;
+
+    int leftIdx = -1;
+    int rightIdx = -1;
+    for (auto &operand : op.getOpOperands()) {
+      auto definingOp = operand.get().getDefiningOp();
+      if (!definingOp) continue;
+      if (leftOps.contains(definingOp)) {
+        assert(leftIdx < 0 && "Found non-unary or binary op");
+        leftIdx = operand.getOperandNumber();
+      }
+
+      if (rightOps.contains(definingOp)) {
+        assert(rightIdx < 0 && "Found non-unary or binary op");
+        rightIdx = operand.getOperandNumber();
+      }
+    }
+    if (leftIdx >= 0 && rightIdx >= 0) {
+      auto leftVal = op.getOpOperand(leftIdx).get();
+      auto rightVal = op.getOpOperand(rightIdx).get();
+      op.setOperand(leftIdx, rightVal);
+      op.setOperand(rightIdx, leftVal);
+      continue;
+    }
+    if (leftIdx >= 0)
+      leftOps.insert(&op);
+    if (rightIdx >= 0)
+      rightOps.insert(&op);
+  }
+}
+
 } // namespace linalg
 } // namespace mlir
