@@ -55,6 +55,8 @@ struct ConvolutionDimensions {
   SmallVector<unsigned, 2> filterLoop;
   SmallVector<unsigned, 2> inputChannel;
   SmallVector<unsigned, 2> depth;
+  SmallVector<int64_t, 2> strides;
+  SmallVector<int64_t, 2> dilations;
 };
 
 /// Checks whether `op` conforms to ConvolutionOpInterface and populates
