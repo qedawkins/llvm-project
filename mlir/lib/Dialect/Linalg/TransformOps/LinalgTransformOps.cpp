@@ -3208,6 +3208,22 @@ transform::HoistRedundantVectorTransfersOp::applyToOne(
 // ConvertConv2DToImg2ColOp.
 //===----------------------------------------------------------------------===//
 
+void transform::ConvertConv2DToImg2ColOp::build(OpBuilder &builder, OperationState &result,
+                                   Value target, bool noFilterCollapse,
+                                   bool noOutputCollapse) {
+  result.addOperands(target);
+  if (noFilterCollapse) {
+    result.addAttribute(ConvertConv2DToImg2ColOp::getNoFilterCollapseAttrName(result.name),
+                        builder.getUnitAttr());
+  }
+  if (noOutputCollapse) {
+    result.addAttribute(ConvertConv2DToImg2ColOp::getNoOutputCollapseAttrName(result.name),
+                        builder.getUnitAttr());
+  }
+  result.addTypes(
+          SmallVector<Type>(2, pdl::OperationType::get(builder.getContext())));
+}
+
 DiagnosedSilenceableFailure transform::ConvertConv2DToImg2ColOp::applyToOne(
     transform::TransformRewriter &rewriter, linalg::LinalgOp target,
     transform::ApplyToEachResultList &results,
@@ -3224,6 +3240,10 @@ DiagnosedSilenceableFailure transform::ConvertConv2DToImg2ColOp::applyToOne(
           })
           .Case([&](linalg::Conv2DNchwFchwOp op) {
             return rewriteInIm2Col(rewriter, op);
+          })
+          .Case([&](linalg::GenericOp op) {
+            return rewriteInIm2Col(rewriter, op,
+                    !getNoFilterCollapse(), !getNoOutputCollapse());
           })
           .Default([&](Operation *op) {
             return rewriter.notifyMatchFailure(op, "not supported");
