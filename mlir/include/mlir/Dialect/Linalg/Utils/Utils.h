@@ -444,6 +444,9 @@ struct RegionMatcher {
   static std::optional<BinaryOpKind> matchAsScalarBinaryOp(GenericOp op);
 };
 
+/// Swaps the uses of the left and right arguments of the given binary generic op.
+void swapGenericBinaryInputArgs(linalg::GenericOp genericOp);
+
 //===----------------------------------------------------------------------===//
 // Loop nest utilities
 //===----------------------------------------------------------------------===//
