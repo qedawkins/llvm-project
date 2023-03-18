@@ -21,6 +21,7 @@
 
 using namespace mlir;
 using namespace mlir::linalg;
+using namespace mlir::linalg::detail;
 
 /// Include the definitions of the copy operation interface.
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.cpp.inc"
@@ -203,6 +204,7 @@ struct ConvAccessExprWalker
     : public AffineExprVisitor<ConvAccessExprWalker, LogicalResult> {
   llvm::SmallDenseSet<unsigned> convolvedDims;
   llvm::SmallDenseSet<unsigned> unConvolvedDims;
+  llvm::SmallDenseMap<unsigned, AffineExpr> strideAndDilationMapping;
 
   LogicalResult visitDimExpr(AffineDimExpr dimExpr) {
     unsigned position = dimExpr.getPosition();
@@ -230,6 +232,9 @@ struct ConvAccessExprWalker
       unsigned dim = dimExpr.getPosition();
       if (convolvedDims.count(dim) || unConvolvedDims.count(dim))
         return failure();
+      // Stride/dilation for this dim is implicitly 1.
+      strideAndDilationMapping[dim] =
+          getAffineConstantExpr(1, expr.getContext());
       convolvedDims.insert(dim);
       return success();
     }
@@ -251,6 +256,7 @@ struct ConvAccessExprWalker
       unsigned dim = dimExpr.getPosition();
       if (convolvedDims.count(dim) || unConvolvedDims.count(dim))
         return failure();
+      strideAndDilationMapping[dim] = mulExpr;
       convolvedDims.insert(dim);
       return success();
     }
@@ -266,6 +272,17 @@ static llvm::SmallDenseSet<unsigned> getPreservedDims(AffineMap map) {
   for (auto expr : map.getResults())
     preservedDims.insert(expr.cast<AffineDimExpr>().getPosition());
   return preservedDims;
+}
+
+static SmallVector<int64_t, 2>
+getConstantsFromExprList(SmallVector<AffineExpr, 2> exprs) {
+  SmallVector<int64_t, 2> vals;
+  for (auto e : exprs) {
+    auto constantExpr = e.dyn_cast<AffineConstantExpr>();
+    assert(constantExpr && "Found non-constant stride/dilation");
+    vals.push_back(constantExpr.getValue());
+  }
+  return vals;
 }
 
 namespace mlir::linalg::detail {
@@ -325,6 +342,7 @@ mlir::linalg::detail::isConvolutionInterfaceImpl(
   // - Depth multiplier : unconvolved in input, present in output, present in
   //   filter.
   llvm::SmallDenseSet<unsigned> allLoopDims;
+  llvm::SmallVector<AffineExpr, 2> strideExprs;
   for (auto outputExpr : indexingMaps.back().getResults()) {
     unsigned outputDim = outputExpr.cast<AffineDimExpr>().getPosition();
     if (inputExprWalker.unConvolvedDims.count(outputDim) &&
@@ -343,8 +361,12 @@ mlir::linalg::detail::isConvolutionInterfaceImpl(
       if (iteratorTypes[outputDim] != utils::IteratorType::parallel)
         return MatchConvolutionResult::OutputDimsNotParallel;
       allLoopDims.insert(outputDim);
-      if (dimensions)
+      if (dimensions) {
+        strideExprs.push_back(
+            inputExprWalker.strideAndDilationMapping[outputDim]);
         dimensions->outputImage.push_back(outputDim);
+      }
+
       continue;
     }
     if (!inputExprWalker.convolvedDims.count(outputDim) &&
@@ -370,6 +392,7 @@ mlir::linalg::detail::isConvolutionInterfaceImpl(
     }
     return MatchConvolutionResult::NonConvolutionLoop;
   }
+  llvm::SmallVector<AffineExpr, 2> dilationExprs;
   for (auto filterExpr : indexingMaps[1].getResults()) {
     unsigned filterDim = filterExpr.cast<AffineDimExpr>().getPosition();
     if (outputDims.count(filterDim) &&
@@ -389,8 +412,11 @@ mlir::linalg::detail::isConvolutionInterfaceImpl(
       if (allLoopDims.count(filterDim))
         return MatchConvolutionResult::NonConvolutionLoop;
       allLoopDims.insert(filterDim);
-      if (dimensions)
+      if (dimensions) {
+        dilationExprs.push_back(
+            inputExprWalker.strideAndDilationMapping[filterDim]);
         dimensions->filterLoop.push_back(filterDim);
+      }
       continue;
     }
     if (inputExprWalker.unConvolvedDims.count(filterDim) &&
@@ -426,6 +452,17 @@ mlir::linalg::detail::isConvolutionInterfaceImpl(
                    dimensions->inputChannel.size() + dimensions->depth.size() ==
                linalgOp.getNumLoops() &&
            "expected all loops to be classified");
+
+    // Use the op carried strides/dilations attribute if present.
+    auto nativeStrides = op->getAttrOfType<DenseIntElementsAttr>("strides");
+    dimensions->strides =
+        !nativeStrides ? getConstantsFromExprList(strideExprs)
+                       : llvm::to_vector<2>(nativeStrides.getValues<int64_t>());
+    auto nativeDilations = op->getAttrOfType<DenseIntElementsAttr>("dilations");
+    dimensions->dilations =
+        !nativeDilations
+            ? getConstantsFromExprList(dilationExprs)
+            : llvm::to_vector<2>(nativeDilations.getValues<int64_t>());
   }
 
   return MatchConvolutionResult::Success;
@@ -459,6 +496,48 @@ LogicalResult mlir::linalg::detail::verifyConvolutionInterface(Operation *op) {
   if (res != MatchConvolutionResult::Success)
     return op->emitError(getMatchConvolutionMessage(res));
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Convolution dimension helpers
+//===----------------------------------------------------------------------===//
+
+DenseMap<unsigned, ConvolutionDimType>
+mlir::linalg::detail::getConvolutionDimTypeMap(
+        ConvolutionDimensions convDims) {
+  DenseMap<unsigned, ConvolutionDimType> convDimMap;
+  for (unsigned b : convDims.batch)
+    convDimMap[b] = ConvolutionDimType::Batch;
+  for (unsigned oi : convDims.outputImage)
+    convDimMap[oi] = ConvolutionDimType::OutputImage;
+  for (unsigned oc : convDims.outputChannel)
+    convDimMap[oc] = ConvolutionDimType::OutputChannel;
+  for (unsigned ic : convDims.inputChannel)
+    convDimMap[ic] = ConvolutionDimType::InputChannel;
+  for (unsigned fl : convDims.filterLoop)
+    convDimMap[fl] = ConvolutionDimType::FilterLoop;
+  for (unsigned d : convDims.depth)
+    convDimMap[d] = ConvolutionDimType::Depth;
+  return convDimMap;
+}
+
+StringRef mlir::linalg::detail::getShortDimTypeName(ConvolutionDimType dimType) {
+  switch (dimType) {
+    case ConvolutionDimType::Batch:
+      return "B";
+    case ConvolutionDimType::OutputImage:
+      return "OI";
+    case ConvolutionDimType::OutputChannel:
+      return "OC";
+    case ConvolutionDimType::InputChannel:
+      return "IC";
+    case ConvolutionDimType::FilterLoop:
+      return "FL";
+    case ConvolutionDimType::Depth:
+      return "D";
+  }
+  llvm_unreachable("unhandled dim type");
+  return "";
 }
 
 //===----------------------------------------------------------------------===//

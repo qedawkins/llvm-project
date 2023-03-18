@@ -55,7 +55,37 @@ struct ConvolutionDimensions {
   SmallVector<unsigned, 2> filterLoop;
   SmallVector<unsigned, 2> inputChannel;
   SmallVector<unsigned, 2> depth;
+  SmallVector<int64_t, 2> strides;
+  SmallVector<int64_t, 2> dilations;
 };
+
+/// Classification of the type of a dimension in a convolution operation.
+enum class ConvolutionDimType {
+  Batch = 0,
+  OutputImage,
+  OutputChannel,
+  FilterLoop,
+  InputChannel,
+  Depth
+};
+
+/// `isa` API for checking the type of a convolution dimension.
+template <ConvolutionDimType DimType>
+[[nodiscard]] static inline bool isa(const ConvolutionDimType type) {
+  return type == DimType;
+}
+
+template<ConvolutionDimType First, ConvolutionDimType Second, ConvolutionDimType... Rest>
+[[nodiscard]] static inline bool isa(const ConvolutionDimType type) {
+    return (isa<First>(type) || isa<Second, Rest...>(type));
+}
+
+/// Returns a map from iteration dim to convolution dimension type.
+DenseMap<unsigned, ConvolutionDimType> getConvolutionDimTypeMap(
+        mlir::linalg::detail::ConvolutionDimensions convDims);
+
+// Returns the short name for a convolution dimension type.
+StringRef getShortDimTypeName(ConvolutionDimType dimType);
 
 /// Checks whether `op` conforms to ConvolutionOpInterface and populates
 /// `dimensions` with indexes of the different kinds of dimensions when present.
