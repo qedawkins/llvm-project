@@ -1969,7 +1969,9 @@ def ConvertConv2DToImg2ColOp : Op<Transform_Dialect,
     Returns a silenceable failure if the pattern application failed.
   }];
 
-  let arguments = (ins TransformHandleTypeInterface:$target);
+  let arguments = (ins TransformHandleTypeInterface:$target,
+                       UnitAttr:$no_filter_collapse,
+                       UnitAttr:$no_output_collapse);
   let results = (outs TransformHandleTypeInterface:$img2col_tensor,
                       TransformHandleTypeInterface:$transformed);
 
@@ -1977,7 +1979,9 @@ def ConvertConv2DToImg2ColOp : Op<Transform_Dialect,
     "$target attr-dict `:` functional-type($target, results)";
 
   let builders = [
-    OpBuilder<(ins "Value":$target)>
+    OpBuilder<(ins "Value":$target,
+                   CArg<"bool", "false">:$noFilterCollapse,
+                   CArg<"bool", "false">:$noOutputCollapse)>
   ];
 
   let extraClassDeclaration = [{
