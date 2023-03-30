@@ -603,7 +603,8 @@ struct RankReducedExtractSliceOp
     SmallVector<OpFoldResult> offsets = sliceOp.getMixedOffsets();
     SmallVector<OpFoldResult> sizes = sliceOp.getMixedSizes();
     SmallVector<OpFoldResult> strides = sliceOp.getMixedStrides();
-    auto reassociation = getReassociationMapForFoldingUnitDims(sizes);
+    auto reassociation =
+        getReassociationMapForFoldingUnitDims(resultType.getShape());
     if (!reassociation ||
         reassociation->size() == static_cast<size_t>(resultType.getRank()))
       return failure();
@@ -632,9 +633,9 @@ struct RankReducedInsertSliceOp : public OpRewritePattern<InsertOpTy> {
                                 PatternRewriter &rewriter) const override {
     RankedTensorType sourceType = insertSliceOp.getSourceType();
     SmallVector<OpFoldResult> offsets = insertSliceOp.getMixedOffsets();
-    SmallVector<OpFoldResult> sizes = insertSliceOp.getMixedSizes();
     SmallVector<OpFoldResult> strides = insertSliceOp.getMixedStrides();
-    auto reassociation = getReassociationMapForFoldingUnitDims(sizes);
+    auto reassociation =
+        getReassociationMapForFoldingUnitDims(sourceType.getShape());
     if (!reassociation ||
         reassociation->size() == static_cast<size_t>(sourceType.getRank()))
       return failure();
