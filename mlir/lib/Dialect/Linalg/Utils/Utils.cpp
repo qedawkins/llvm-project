@@ -963,15 +963,14 @@ void offsetIndices(RewriterBase &b, LinalgOp linalgOp,
 /// but non-zero offsets are not handled by SPIR-V backend at this point (and
 /// potentially cannot be handled).
 std::optional<SmallVector<ReassociationIndices>>
-getReassociationMapForFoldingUnitDims(ArrayRef<OpFoldResult> mixedSizes) {
+getReassociationMapForFoldingUnitDims(ArrayRef<int64_t> targetShape) {
   SmallVector<ReassociationIndices> reassociation;
   ReassociationIndices curr;
-  for (const auto &it : llvm::enumerate(mixedSizes)) {
+  for (const auto &it : llvm::enumerate(targetShape)) {
     auto dim = it.index();
     auto size = it.value();
     curr.push_back(dim);
-    auto attr = size.dyn_cast<Attribute>();
-    if (attr && attr.cast<IntegerAttr>().getInt() == 1)
+    if (size == 1)
       continue;
     reassociation.emplace_back(ReassociationIndices{});
     std::swap(reassociation.back(), curr);

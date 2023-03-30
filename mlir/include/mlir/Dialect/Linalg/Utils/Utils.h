@@ -128,7 +128,7 @@ GenericOp makeMemRefCopyOp(OpBuilder &b, Location loc, Value from, Value to);
 /// general, but non-zero offsets are not handled by SPIR-V backend at this
 /// point (and potentially cannot be handled).
 std::optional<SmallVector<ReassociationIndices>>
-getReassociationMapForFoldingUnitDims(ArrayRef<OpFoldResult> mixedSizes);
+getReassociationMapForFoldingUnitDims(ArrayRef<int64_t> targetShape);
 
 /// Return the identity numeric value associated to the give op. Return
 /// std::nullopt if there is no known neutral element.
