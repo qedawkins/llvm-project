@@ -75,9 +75,23 @@ static PackInfo getPackingInfoFromOperand(AffineMap indexingMap,
     });
   }
 
-  for (auto dim : packOrUnPackOp.getOuterDimsPerm())
-    packInfo.outerDimsOnDomainPerm.push_back(indexingMap.getDimPosition(dim));
-  if (!packInfo.outerDimsOnDomainPerm.empty()) {
+  llvm::DenseMap<int64_t, int64_t> outerDimMapping;
+  for (auto [index, dim] : llvm::enumerate(packOrUnPackOp.getOuterDimsPerm())) {
+    auto expr = indexingMap.getResult(index);
+    auto permutedExpr = indexingMap.getResult(dim);
+    if (auto dimExpr = expr.template dyn_cast<AffineDimExpr>()) {
+      assert(permutedExpr.template isa<AffineDimExpr>() &&
+             "Attempted to permute a non affine dim expression");
+      outerDimMapping[dimExpr.getPosition()] = indexingMap.getDimPosition(dim);
+      continue;
+    }
+    assert(index == dim && expr.template isa<AffineConstantExpr>() &&
+           "Found a non constant or dim affine expression");
+  }
+  if (!outerDimMapping.empty()) {
+    for (int i = 0, e = indexingMap.getNumDims(); i < e; i++)
+      packInfo.outerDimsOnDomainPerm.push_back(
+              outerDimMapping.contains(i) ? outerDimMapping[i] : i);
     LLVM_DEBUG({
       llvm::dbgs() << "map outer dimsDimsPerm to ";
       for (auto dim : packInfo.outerDimsOnDomainPerm)
@@ -107,8 +121,10 @@ static SmallVector<int64_t> computeOuterDims(ArrayRef<int64_t> perm,
   SmallVector<int64_t> outerDimsPerm;
   DenseMap<int64_t, int64_t> currentPositionTileLoops;
   for (auto [pos, expr] : llvm::enumerate(exprs)) {
-    unsigned posInDomain = expr.cast<AffineDimExpr>().getPosition();
-    currentPositionTileLoops[posInDomain] = pos;
+    if (auto dimExpr = expr.dyn_cast<AffineDimExpr>())
+      currentPositionTileLoops[dimExpr.getPosition()] = pos;
+    else
+      currentPositionTileLoops[pos] = pos;
   }
   for (int64_t loopIdx : perm) {
     if (currentPositionTileLoops.count(loopIdx))
@@ -212,7 +228,7 @@ getOrCreatePackedViewOfOperand(OpBuilder &b, Location loc, PackInfo packInfo,
   auto indexingMap = AffineMap::get(numLoops, 0, exprs, b.getContext());
 
   // The operand does not have dimensions that relates to pack op.
-  if (innerDimsPos.empty())
+  if (innerDimsPos.empty() && outerDimsPerm.empty())
     return std::make_tuple(opOperand->get(), indexingMap);
 
   auto empty = tensor::PackOp::createDestinationTensor(
