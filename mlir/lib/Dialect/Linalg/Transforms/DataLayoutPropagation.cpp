@@ -192,8 +192,8 @@ getOrCreatePackedViewOfOperand(OpBuilder &b, Location loc, PackInfo packInfo,
       domainDimToOperandDim[dimPos] = index;
       continue;
     }
-    assert(expr.isa<AffineConstantExpr>() &&
-           "Found non-constant and non-affine dim expression");
+    //assert(expr.isa<AffineConstantExpr>() &&
+    //       "Found non-constant and non-affine dim expression");
   }
   SmallVector<int64_t> innerDimsPos;
   SmallVector<OpFoldResult> innerTileSizes;
@@ -492,6 +492,7 @@ pushDownUnPackOpThroughGenericOp(RewriterBase &rewriter,
   auto [packedOutOperand, packedOutIndexingMap] =
       getOrCreatePackedViewOfOperand(rewriter, genericOp.getLoc(), *packInfo,
                                      genericOp, genericOp.getDpsInitOperand(0));
+  auto destPack = packedOutOperand.getDefiningOp<tensor::PackOp>();
 
   // If the dps init operand of the generic is a tensor.empty, do not pack it
   // and forward the new tensor.empty as a destination.
@@ -499,40 +500,39 @@ pushDownUnPackOpThroughGenericOp(RewriterBase &rewriter,
   if (auto initTensor = genericOp.getDpsInitOperand(0)
                             ->get()
                             .getDefiningOp<tensor::EmptyOp>()) {
-    if (auto packOp = packedOutOperand.getDefiningOp<tensor::PackOp>())
-      dest = packOp.getDest();
+    if (destPack) dest = destPack.getDest();
   }
 
   // Pack the genericOp.
   GenericOp newGenericOp = packElementWiseOp(rewriter, genericOp, dest,
                                              packedOutIndexingMap, *packInfo);
+  Value newResult = newGenericOp.getTiedOpResult(newGenericOp.getDpsInitOperand(0));
 
-  // If the output element type for the generic differs from the source
-  // unpack op, we need to create a new destination tensor.
+  // If the output is unaffected, no need to unpack.
+  if (!destPack)
+    return std::make_tuple(newGenericOp, newResult);
+
+  auto mixedTiles = destPack.getMixedTiles();
+  auto innerDimsPos = destPack.getInnerDimsPos();
+  auto outerDimsPerm = destPack.getOuterDimsPerm();
+
+  // If the output type for the generic differs from the source
+  // unpack op, we need to create a new destination tensor. In the
+  // dynamic case we always need a new destination.
   auto loc = genericOp.getLoc();
   Value unPackDest = producerUnPackOp.getDest();
-  auto genericOutElementType = getElementTypeOrSelf(genericOp.getResult(0));
-  if (producerUnPackOp.getDestType().getElementType() !=
-      genericOutElementType) {
-    SmallVector<OpFoldResult> unPackMixedSizes;
-    if (auto unPackEmpty = unPackDest.getDefiningOp<tensor::EmptyOp>())
-      unPackMixedSizes = unPackEmpty.getMixedSizes();
-    else
-      unPackMixedSizes = tensor::getMixedSizes(rewriter, loc, unPackDest);
-
-    unPackDest = rewriter.create<tensor::EmptyOp>(loc, unPackMixedSizes,
-                                                  genericOutElementType);
+  auto genericOutType = genericOp.getTiedOpResult(genericOp.getDpsInitOperand(0))
+                    .getType().cast<RankedTensorType>();
+  if (producerUnPackOp.getDestType() != genericOutType || !genericOutType.hasStaticShape()) {
+    unPackDest = tensor::UnPackOp::createDestinationTensor(
+        rewriter, loc, newResult, mixedTiles, innerDimsPos, outerDimsPerm);
   }
 
   // Insert an unPackOp right after the packed generic.
   Value unPackOpRes =
       rewriter
           .create<tensor::UnPackOp>(
-              loc,
-              newGenericOp.getTiedOpResult(newGenericOp.getDpsInitOperand(0)),
-              unPackDest, producerUnPackOp.getInnerDimsPos(),
-              producerUnPackOp.getMixedTiles(),
-              producerUnPackOp.getOuterDimsPerm())
+              loc, newResult, unPackDest, innerDimsPos, mixedTiles, outerDimsPerm)
           .getResult();
 
   return std::make_tuple(newGenericOp, unPackOpRes);

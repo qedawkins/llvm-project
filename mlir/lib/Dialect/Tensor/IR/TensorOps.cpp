@@ -3724,6 +3724,41 @@ void UnPackOp::build(OpBuilder &builder, OperationState &state, Value source,
         builder.getDenseI64ArrayAttr(staticTileSizes));
 }
 
+Value UnPackOp::createDestinationTensor(OpBuilder &b, Location loc, Value source,
+                                      ArrayRef<OpFoldResult> innerTileSizes,
+                                      ArrayRef<int64_t> innerDimsPos,
+                                      ArrayRef<int64_t> outerDimsPerm) {
+  AffineExpr sym0, sym1;
+  bindSymbols(b.getContext(), sym0, sym1);
+  auto dimMul = [&](OpFoldResult v1, OpFoldResult v2) -> OpFoldResult {
+    return makeComposedFoldedAffineApply(b, loc, sym0 * sym1, {v1, v2});
+  };
+
+  SmallVector<OpFoldResult> mixedSizes;
+  ArrayRef<int64_t> sourceShape = source.getType().cast<RankedTensorType>().getShape();
+  int64_t sourceRank = source.getType().cast<RankedTensorType>().getRank();
+  //for (auto [index, value] :
+  //     llvm::enumerate(source.getType().cast<RankedTensorType>().getShape())) {
+  for (auto i : llvm::seq<unsigned>(0, sourceRank - innerTileSizes.size())) {
+    if (ShapedType::isDynamic(sourceShape[i]))
+      mixedSizes.push_back(b.create<DimOp>(loc, source, i).getResult());
+    else
+      mixedSizes.push_back(b.getIndexAttr(sourceShape[i]));
+  }
+  if (!outerDimsPerm.empty())
+    applyPermutationToVector<OpFoldResult>(
+        mixedSizes, invertPermutationVector(outerDimsPerm));
+
+  for (auto it : llvm::zip(innerDimsPos, innerTileSizes)) {
+    int64_t dimPos = std::get<0>(it);
+    OpFoldResult tileSize = std::get<1>(it);
+    mixedSizes[dimPos] = dimMul(mixedSizes[dimPos], tileSize);
+  }
+
+  auto elemType = source.getType().cast<ShapedType>().getElementType();
+  return b.create<tensor::EmptyOp>(loc, mixedSizes, elemType);
+}
+
 UnPackOp UnPackOp::createTransposedClone(OpBuilder &b, Location loc,
                                          Value transposedSource,
                                          ArrayRef<int64_t> innerPermutation,
