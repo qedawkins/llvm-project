@@ -333,6 +333,81 @@ public:
   }
 };
 
+// Breaks down vector.bitcast op on vector.insert op.
+//
+// This transforms IR like:
+//   %0 = vector.insert %src, %dst {
+//          offsets = [0], strides = [1]} : vector<4xf16> into vector<8xf16>
+//   %1 = vector.bitcast %0: vector<8xf16> to vector<4xf32>
+// Into:
+//   %0 = vector.bitcast %src : vector<4xf16> to vector<2xf32>
+//   %1 = vector.bitcast %dst : vector<8xf16> to vector<4xf32>
+//   %2 = vector.insert_strided_slice %src, %dst {
+//          offsets = [0], strides = [1]} : vector<2xf32> into vector<4xf32>
+struct BreakDownBitCastOfInsert
+    : public OpRewritePattern<vector::BitCastOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::BitCastOp bitcastOp,
+                                PatternRewriter &rewriter) const override {
+    VectorType castSrcType = bitcastOp.getSourceVectorType();
+    VectorType castDstType = bitcastOp.getResultVectorType();
+    assert(castSrcType.getRank() == castDstType.getRank());
+
+    // Only support rank 1 case for now.
+    if (castSrcType.getRank() != 1)
+      return failure();
+
+    int64_t castSrcLastDim = castSrcType.getShape().back();
+    int64_t castDstLastDim = castDstType.getShape().back();
+    // Require casting to less elements for now; other cases to be implemented.
+    if (castSrcLastDim < castDstLastDim)
+      return failure();
+
+    assert(castSrcLastDim % castDstLastDim == 0);
+    int64_t shrinkRatio = castSrcLastDim / castDstLastDim;
+    // Nothing to do if it is already bitcasting to a single element.
+    if (castSrcLastDim == shrinkRatio)
+      return failure();
+
+    auto insertOp =
+        bitcastOp.getSource().getDefiningOp<vector::InsertOp>();
+    if (!insertOp)
+      return failure();
+
+    if (!insertOp.getSourceType().isIntOrFloat())
+      return failure();
+
+    auto loc = bitcastOp.getLoc();
+    auto elemType = castDstType.getElementType();
+    assert(elemType.isSignlessIntOrIndexOrFloat());
+
+    Value zero = rewriter.create<arith::ConstantOp>(
+        loc, elemType, rewriter.getZeroAttr(elemType));
+    Value res = rewriter.create<SplatOp>(loc, castDstType, zero);
+
+    SmallVector<int64_t> sliceShape{shrinkRatio};
+    SmallVector<int64_t> strides{1};
+    VectorType newCastDstType =
+        VectorType::get(SmallVector<int64_t>{1}, castDstType.getElementType());
+
+    for (auto i : llvm::seq<unsigned>(0, castDstLastDim)) {
+      Value extracted = rewriter.create<ExtractStridedSliceOp>(
+          loc, insertOp.getResult(), ArrayRef<int64_t>{i * shrinkRatio},
+          sliceShape, strides);
+      Value bitcast = rewriter.create<BitCastOp>(
+          loc, newCastDstType, extracted);
+      res = rewriter.create<InsertStridedSliceOp>(
+          loc, bitcast, res,
+          ArrayRef<int64_t>{i},
+          strides);
+    }
+    rewriter.replaceOp(bitcastOp, res);
+    return success();
+  }
+};
+
+
 void vector::populateVectorInsertExtractStridedSliceDecompositionPatterns(
     RewritePatternSet &patterns, PatternBenefit benefit) {
   patterns.add<DecomposeDifferentRankInsertStridedSlice,
@@ -345,6 +420,7 @@ void vector::populateVectorExtractStridedSliceToExtractInsertChainPatterns(
     PatternBenefit benefit) {
   patterns.add<Convert1DExtractStridedSliceIntoExtractInsertChain>(
       patterns.getContext(), std::move(controlFn), benefit);
+  patterns.add<BreakDownBitCastOfInsert>(patterns.getContext());
 }
 
 /// Populate the given list with patterns that convert from Vector to LLVM.
