@@ -32,13 +32,6 @@ using namespace mlir::linalg;
 
 namespace {
 
-static bool hasGatherSemantics(linalg::GenericOp genericOp) {
-  for (Operation &op : genericOp.getBody()->getOperations())
-    if (isa<tensor::ExtractOp, linalg::IndexOp>(op))
-      return true;
-  return false;
-}
-
 // The struct contains the infomation about mapping packing information to
 // the iteration domain of Linalg ops.
 struct PackInfo {
@@ -54,22 +47,56 @@ struct PackInfo {
   SmallVector<int64_t> outerDimsOnDomainPerm;
 };
 
+static FailureOr<int64_t> getDimPosFromDefiningLinalgIndex(Value index) {
+  auto indexOp = index.getDefiningOp<linalg::IndexOp>();
+  if (!indexOp)
+    return failure();
+  return indexOp.getDim();
+}
+
+static LogicalResult verifyPackInfoOnGeneric(PackInfo packInfo,
+                                             linalg::GenericOp genericOp) {
+  // Bail out if a tiled dimension is present in a map but not as an affine dim
+  // expression.
+  auto areAllAffineDimExpr = [&](int dim) {
+    for (AffineMap map : genericOp.getIndexingMapsArray()) {
+      if (llvm::any_of(map.getResults(), [dim](AffineExpr expr) {
+            return expr.isFunctionOfDim(dim) && !expr.isa<AffineDimExpr>();
+          })) {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (int64_t i : packInfo.tiledDimsPos)
+    if (!areAllAffineDimExpr(i))
+      return failure();
+  // Similarly fail if we have a tiled dimension with non-tensor.extract users.
+  for (linalg::IndexOp indexOp :
+       genericOp.getBody()->getOps<linalg::IndexOp>()) {
+    auto domainDimPos = indexOp.getDim();
+    if (packInfo.domainDimAndTileMapping.count(domainDimPos) &&
+        llvm::any_of(indexOp->getUsers(), [](Operation *user) {
+          return !isa<tensor::ExtractOp>(user);
+        })) {
+      return failure();
+    }
+  }
+  return success();
+}
+
 template <typename OpTy>
-static FailureOr<PackInfo>
-getPackingInfoFromOperand(OpOperand *opOperand, linalg::GenericOp genericOp,
-                          OpTy packOrUnPackOp) {
+static FailureOr<PackInfo> getPackingInfoFromMap(AffineMap indexingMap,
+                                                 linalg::GenericOp genericOp,
+                                                 OpTy packOrUnPackOp) {
   static_assert(llvm::is_one_of<OpTy, tensor::PackOp, tensor::UnPackOp>::value,
                 "applies to only pack or unpack operations");
-  LLVM_DEBUG(
-      { llvm::dbgs() << "--- Construct PackInfo From an operand ---\n"; });
-
-  AffineMap indexingMap = genericOp.getMatchingIndexingMap(opOperand);
-  SmallVector<AffineMap> indexingMaps = genericOp.getIndexingMapsArray();
-  SmallVector<utils::IteratorType> iterators =
-      genericOp.getIteratorTypesArray();
+  LLVM_DEBUG({ llvm::dbgs() << "--- Construct PackInfo From a map ---\n"; });
 
   PackInfo packInfo;
   int64_t origNumDims = indexingMap.getNumDims();
+  SmallVector<utils::IteratorType> iterators =
+      genericOp.getIteratorTypesArray();
   SmallVector<AffineExpr> exprs(indexingMap.getResults());
   ArrayRef<int64_t> innerDimsPos = packOrUnPackOp.getInnerDimsPos();
   for (auto [index, innerDimPos, tileSize] :
@@ -85,30 +112,7 @@ getPackingInfoFromOperand(OpOperand *opOperand, linalg::GenericOp genericOp,
     packInfo.tiledDimsPos.push_back(domainDimPos);
     packInfo.domainDimAndTileMapping[domainDimPos] = tileSize;
     packInfo.tileToPointMapping[domainDimPos] = origNumDims + index;
-    LLVM_DEBUG({
-      llvm::dbgs() << "map innerDimPos=" << innerDimPos
-                   << " to iteration dimension (d" << domainDimPos << ", d"
-                   << packInfo.tileToPointMapping[domainDimPos]
-                   << "), which has size=("
-                   << packInfo.domainDimAndTileMapping[domainDimPos] << ")\n";
-    });
   }
-
-  // Bail out if a tiled dimension is present in a map but not as an affine dim
-  // expression.
-  auto areAllAffineDimExpr = [&](int dim) {
-    for (AffineMap map : indexingMaps) {
-      if (llvm::any_of(map.getResults(), [dim](AffineExpr expr) {
-            return expr.isFunctionOfDim(dim) && !expr.isa<AffineDimExpr>();
-          })) {
-        return false;
-      }
-    }
-    return true;
-  };
-  for (int64_t i : packInfo.tiledDimsPos)
-    if (!areAllAffineDimExpr(i))
-      return failure();
 
   // Get the outer dims perm on the iteration domain. Start by identifying the
   // set of domain dims affected by the outer permutation along with the
@@ -145,15 +149,47 @@ getPackingInfoFromOperand(OpOperand *opOperand, linalg::GenericOp genericOp,
       packInfo.outerDimsOnDomainPerm.push_back(
           permutedDomainDims.contains(i) ? permutedOuterDims[outerDimIndex++]
                                          : i);
-    LLVM_DEBUG({
+  }
+
+  if (failed(verifyPackInfoOnGeneric(packInfo, genericOp)))
+    return failure();
+
+  LLVM_DEBUG({
+    for (auto [domainDimPos, innerDimPos] :
+         llvm::zip_equal(packInfo.tiledDimsPos, innerDimsPos)) {
+      llvm::dbgs() << "map innerDimPos=" << innerDimPos
+                   << " to iteration dimension (d" << domainDimPos << ", d"
+                   << packInfo.tileToPointMapping[domainDimPos]
+                   << "), which has size=("
+                   << packInfo.domainDimAndTileMapping[domainDimPos] << ")\n";
+    }
+    if (!packInfo.outerDimsOnDomainPerm.empty()) {
       llvm::dbgs() << "map outer dimsDimsPerm to ";
       for (auto dim : packInfo.outerDimsOnDomainPerm)
         llvm::dbgs() << dim << " ";
       llvm::dbgs() << "\n";
-    });
-  }
-
+    }
+  });
   return packInfo;
+}
+
+// Infers an affine map for a tensor.extract op based on the defining
+// linalg.index ops. Dims that aren't defined directly by a linalg.index op (and
+// thus aren't the equivalent of an affine dim expression) are labelled with an
+// opaque symbol expression.
+static AffineMap getPartialMapFromTensorExtract(int64_t numLoops,
+                                                tensor::ExtractOp extractOp) {
+  auto context = extractOp.getContext();
+  SmallVector<AffineExpr> exprs;
+  AffineExpr zeroSym = getAffineSymbolExpr(0, context);
+  for (auto index : extractOp.getIndices()) {
+    auto domainIndex = getDimPosFromDefiningLinalgIndex(index);
+    if (failed(domainIndex))
+      exprs.push_back(zeroSym);
+    else
+      exprs.push_back(getAffineDimExpr(*domainIndex, context));
+  }
+  return AffineMap::get(numLoops, /*symbolCount=*/1, exprs, context);
 }
 
 static SmallVector<int64_t> computeOuterDims(ArrayRef<int64_t> perm,
@@ -293,6 +329,93 @@ getOrCreatePackedViewOfOperand(OpBuilder &b, Location loc, PackInfo packInfo,
   return std::make_tuple(packedOperand, indexingMap);
 }
 
+static void packExtractOp(RewriterBase &rewriter, Location loc,
+                          tensor::ExtractOp extractOp,
+                          linalg::GenericOp genericOp, PackInfo packInfo) {
+  SmallVector<Value> indices = extractOp.getIndices();
+
+  llvm::DenseMap<int64_t, int64_t> domainDimToOperandDim;
+  for (auto [index, extractIndex] : llvm::enumerate(indices)) {
+    auto domainIndex = getDimPosFromDefiningLinalgIndex(extractIndex);
+    if (succeeded(domainIndex))
+      domainDimToOperandDim[*domainIndex] = index;
+  }
+
+  SmallVector<int64_t> innerDimsPos;
+  SmallVector<OpFoldResult> innerTileSizes;
+  for (auto dimPos : packInfo.tiledDimsPos) {
+    if (!domainDimToOperandDim.count(dimPos))
+      continue;
+    int64_t operandIndex = domainDimToOperandDim[dimPos];
+    innerTileSizes.push_back(packInfo.domainDimAndTileMapping[dimPos]);
+    innerDimsPos.push_back(operandIndex);
+    Value newIndex = rewriter.create<linalg::IndexOp>(
+        loc, packInfo.tileToPointMapping[dimPos]);
+    indices.push_back(newIndex);
+  }
+
+  SmallVector<int64_t> outerDimsPerm;
+  if (!packInfo.outerDimsOnDomainPerm.empty()) {
+    auto indexingMap =
+        getPartialMapFromTensorExtract(genericOp.getNumLoops(), extractOp);
+    outerDimsPerm = computeOuterDims(packInfo.outerDimsOnDomainPerm,
+                                     indexingMap.getResults());
+    SmallVector<Value> auxVec = indices;
+    for (const auto &en : enumerate(outerDimsPerm))
+      auxVec[en.index()] = indices[en.value()];
+    indices = auxVec;
+  }
+
+  if (innerDimsPos.empty() && outerDimsPerm.empty())
+    return;
+
+  LLVM_DEBUG({ llvm::dbgs() << "--- Propagating through extract op ---\n"; });
+
+  Value packedTensor = extractOp.getTensor();
+  {
+    OpBuilder::InsertionGuard guardPack(rewriter);
+    rewriter.setInsertionPoint(genericOp);
+    auto empty = tensor::PackOp::createDestinationTensor(
+        rewriter, loc, packedTensor, innerTileSizes, innerDimsPos,
+        outerDimsPerm);
+    packedTensor = rewriter.create<tensor::PackOp>(
+        loc, packedTensor, empty, innerDimsPos, innerTileSizes,
+        /*padding=*/std::nullopt, outerDimsPerm);
+  }
+
+  {
+    OpBuilder::InsertionGuard guardExtract(rewriter);
+    rewriter.setInsertionPoint(extractOp);
+    auto newExtract = rewriter.replaceOpWithNewOp<tensor::ExtractOp>(
+        extractOp, packedTensor, indices);
+  }
+}
+
+static void packExtractedTensors(RewriterBase &rewriter, Location loc,
+                                 GenericOp genericOp,
+                                 const PackInfo &packInfo) {
+  // Rewrite extract ops in terms of the packed + permuted inner dims.
+  OpBuilder::InsertionGuard guard(rewriter);
+  Block *body = genericOp.getBody();
+  rewriter.setInsertionPointToStart(body);
+  // Remember the existing index ops now to know which ones to update later.
+  SmallVector<linalg::IndexOp> indexOps(body->getOps<linalg::IndexOp>());
+
+  SmallVector<tensor::ExtractOp> extractOps(
+      genericOp.getBody()->getOps<tensor::ExtractOp>());
+  for (tensor::ExtractOp extractOp : extractOps)
+    packExtractOp(rewriter, loc, extractOp, genericOp, packInfo);
+
+  if (!packInfo.outerDimsOnDomainPerm.empty()) {
+    SmallVector<int64_t> inversedOuterPerm =
+        invertPermutationVector(packInfo.outerDimsOnDomainPerm);
+    for (auto indexOp : indexOps) {
+      rewriter.replaceOpWithNewOp<linalg::IndexOp>(
+          indexOp, inversedOuterPerm[indexOp.getDim()]);
+    }
+  }
+}
+
 /// Pack an element-wise genericOp and return it.
 static GenericOp packElementWiseOp(RewriterBase &rewriter, GenericOp genericOp,
                                    Value dest, AffineMap packedOutIndexingMap,
@@ -319,6 +442,7 @@ static GenericOp packElementWiseOp(RewriterBase &rewriter, GenericOp genericOp,
       /*bodyBuild=*/nullptr, linalg::getPrunedAttributeList(genericOp));
   rewriter.cloneRegionBefore(genericOp.getRegion(), newGenericOp.getRegion(),
                              newGenericOp.getRegion().begin());
+  packExtractedTensors(rewriter, loc, newGenericOp, packInfo);
   return newGenericOp;
 }
 
@@ -376,12 +500,6 @@ bubbleUpPackOpThroughGenericOp(RewriterBase &rewriter, tensor::PackOp packOp,
   if (!controlFn(genericOp))
     return failure();
 
-  // TODO: Enable propagation in the presence of linalg.index and
-  // tensor.extract, likely as a separate pattern as the pack information and
-  // propagation decision needs to be inferred from the region of the generic.
-  if (hasGatherSemantics(genericOp))
-    return failure();
-
   // TODO: Relax the restriction. We are able to bubble up the pack op through
   // multi-result generic op. It just needs more work.
   if (genericOp.getNumResults() != 1)
@@ -425,9 +543,15 @@ bubbleUpPackOpThroughGenericOp(RewriterBase &rewriter, tensor::PackOp packOp,
     return failure();
 
   OpOperand *opOperand = genericOp.getDpsInitOperand(0);
-  auto packInfo = getPackingInfoFromOperand(opOperand, genericOp, packOp);
+  AffineMap indexingMap = genericOp.getMatchingIndexingMap(opOperand);
+  auto packInfo = getPackingInfoFromMap(indexingMap, genericOp, packOp);
   if (failed(packInfo))
     return failure();
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "--- Bubbling up pack ---\n";
+    llvm::dbgs() << packOp << "\n";
+  });
 
   // Rebuild the indexing map for the corresponding init operand.
   auto [packedOutOperand, packedOutIndexingMap] =
@@ -481,6 +605,16 @@ static FailureOr<OpOperand *> getUnPackedOperand(GenericOp genericOp) {
       return failure();
     unPackedOperand = &operand;
   }
+  for (tensor::ExtractOp extractOp :
+       genericOp.getBody()->getOps<tensor::ExtractOp>()) {
+    Value extractedTensor = extractOp.getTensor();
+    auto unPackOp = extractedTensor.getDefiningOp<tensor::UnPackOp>();
+    if (!unPackOp)
+      continue;
+    if (unPackedOperand)
+      return failure();
+    unPackedOperand = &extractOp->getOpOperand(0);
+  }
   if (!unPackedOperand)
     return failure();
   return unPackedOperand;
@@ -525,9 +659,6 @@ pushDownUnPackOpThroughGenericOp(RewriterBase &rewriter, GenericOp genericOp) {
   if (genericOp.getNumResults() != 1)
     return failure();
 
-  if (hasGatherSemantics(genericOp))
-    return failure();
-
   // Collect the unPacked operand, if present.
   auto maybeUnPackedOperand = getUnPackedOperand(genericOp);
   if (failed(maybeUnPackedOperand))
@@ -538,10 +669,21 @@ pushDownUnPackOpThroughGenericOp(RewriterBase &rewriter, GenericOp genericOp) {
   tensor::UnPackOp producerUnPackOp =
       unPackedOperand->get().getDefiningOp<tensor::UnPackOp>();
   assert(producerUnPackOp && "expect a valid UnPackOp");
+  AffineMap indexingMap;
+  if (auto extractOp = dyn_cast<tensor::ExtractOp>(unPackedOperand->getOwner()))
+    indexingMap =
+        getPartialMapFromTensorExtract(genericOp.getNumLoops(), extractOp);
+  else
+    indexingMap = genericOp.getMatchingIndexingMap(unPackedOperand);
   auto packInfo =
-      getPackingInfoFromOperand(unPackedOperand, genericOp, producerUnPackOp);
+      getPackingInfoFromMap(indexingMap, genericOp, producerUnPackOp);
   if (failed(packInfo))
     return failure();
+
+  LLVM_DEBUG({
+    llvm::dbgs() << "--- Pushing down unpack ---\n";
+    llvm::dbgs() << producerUnPackOp << "\n";
+  });
 
   // Rebuild the indexing map for the corresponding init operand.
   auto [packedOutOperand, packedOutIndexingMap] =
