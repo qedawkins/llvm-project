@@ -19,7 +19,11 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/Support/Debug.h"
 #include <utility>
+
+#define DEBUG_TYPE "convert-to-img2col"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 
 namespace mlir {
 namespace linalg {
@@ -70,6 +74,591 @@ static Value getConvolvedIndex(OpBuilder &b, Location loc, Value oIndex,
   AffineMap convMap = AffineMap::get(0, 2, stride * oExpr + fExpr);
   return makeComposedAffineApply(b, loc, convMap, ValueRange{oIndex, fIndex});
 }
+
+static void swapMatmulBlockArgs(linalg::GenericOp genericOp) {
+  Value leftOperand = genericOp.getRegion().front().getArgument(0);
+  Value rightOperand = genericOp.getRegion().front().getArgument(1);
+  auto leftUses = leftOperand.getUses();
+  auto rightUses = rightOperand.getUses();
+  leftOperand.replaceUsesWithIf(rightOperand, [&](OpOperand &use) {
+    return llvm::any_of(leftUses, [&](OpOperand &newUse) {
+              return newUse.getOwner() == use.getOwner() &&
+                    newUse.getOperandNumber() == use.getOperandNumber();
+            });
+  });
+  rightOperand.replaceUsesWithIf(leftOperand, [&](OpOperand &use) {
+    return llvm::any_of(rightUses, [&](OpOperand &newUse) {
+              return newUse.getOwner() == use.getOwner() &&
+                    newUse.getOperandNumber() == use.getOperandNumber();
+            });
+  });
+  llvm::SmallDenseSet<Operation *, 2> leftOps;
+  llvm::SmallDenseSet<Operation *, 2> rightOps;
+  for (Operation *user : leftOperand.getUsers())
+    leftOps.insert(user);
+  for (Operation *user : rightOperand.getUsers())
+    rightOps.insert(user);
+
+  for (Operation &op : genericOp.getRegion().front()) {
+    if (leftOps.contains(&op) || rightOps.contains(&op))
+      continue;
+
+    int leftIdx = -1;
+    int rightIdx = -1;
+    for (auto &operand : op.getOpOperands()) {
+      auto definingOp = operand.get().getDefiningOp();
+      if (!definingOp) continue;
+      if (leftOps.contains(definingOp)) {
+        assert(leftIdx < 0 && "Found non-unary or binary op");
+        leftIdx = operand.getOperandNumber();
+      }
+
+      if (rightOps.contains(definingOp)) {
+        assert(rightIdx < 0 && "Found non-unary or binary op");
+        rightIdx = operand.getOperandNumber();
+      }
+    }
+    if (leftIdx >= 0 && rightIdx >= 0) {
+      auto leftVal = op.getOpOperand(leftIdx).get();
+      auto rightVal = op.getOpOperand(rightIdx).get();
+      op.setOperand(leftIdx, rightVal);
+      op.setOperand(rightIdx, leftVal);
+      continue;
+    }
+    if (leftIdx >= 0)
+      leftOps.insert(&op);
+    if (rightIdx >= 0)
+      rightOps.insert(&op);
+  }
+}
+
+static SmallVector<int64_t> getDimOrder(AffineMap map) {
+  SmallVector<int64_t> dimOrder;
+  for (AffineExpr expr : map.getResults())
+    dimOrder.push_back(expr.cast<AffineDimExpr>().getPosition());
+  return dimOrder;
+}
+
+enum class ConvolutionDimType {
+  Batch = 0,
+  OutputImage,
+  OutputChannel,
+  FilterLoop,
+  InputChannel,
+  Depth
+};
+
+static ConvolutionDimType getConvolutionDimType(unsigned dim,
+        mlir::linalg::detail::ConvolutionDimensions convDims) {
+  if (llvm::is_contained(convDims.batch, dim))
+    return ConvolutionDimType::Batch;
+  if (llvm::is_contained(convDims.outputImage, dim))
+    return ConvolutionDimType::OutputImage;
+  if (llvm::is_contained(convDims.outputChannel, dim))
+    return ConvolutionDimType::OutputChannel;
+  if (llvm::is_contained(convDims.filterLoop, dim))
+    return ConvolutionDimType::FilterLoop;
+  if (llvm::is_contained(convDims.depth, dim))
+    return ConvolutionDimType::Depth;
+  llvm_unreachable("unhandled dim type");
+  return ConvolutionDimType::Batch;
+}
+
+template <ConvolutionDimType DimType>
+[[nodiscard]] static inline bool isa(const ConvolutionDimType type) {
+  return type == DimType;
+}
+
+template<ConvolutionDimType First, ConvolutionDimType Second, ConvolutionDimType... Rest>
+[[nodiscard]] static inline bool isa(const ConvolutionDimType type) {
+    return (isa<First>(type) || isa<Second, Rest...>(type));
+}
+
+static DenseMap<unsigned, ConvolutionDimType> getConvolutionDimMap(
+        mlir::linalg::detail::ConvolutionDimensions convDims) {
+  DenseMap<unsigned, ConvolutionDimType> convDimMap;
+  for (unsigned b : convDims.batch)
+    convDimMap[b] = ConvolutionDimType::Batch;
+  for (unsigned oi : convDims.outputImage)
+    convDimMap[oi] = ConvolutionDimType::OutputImage;
+  for (unsigned oc : convDims.outputChannel)
+    convDimMap[oc] = ConvolutionDimType::OutputChannel;
+  for (unsigned ic : convDims.inputChannel)
+    convDimMap[ic] = ConvolutionDimType::InputChannel;
+  for (unsigned fl : convDims.filterLoop)
+    convDimMap[fl] = ConvolutionDimType::FilterLoop;
+  for (unsigned d : convDims.depth)
+    convDimMap[d] = ConvolutionDimType::Depth;
+  return convDimMap;
+}
+
+static StringRef getShortDimTypeName(ConvolutionDimType dimType) {
+  switch (dimType) {
+    case ConvolutionDimType::Batch:
+      return "B";
+    case ConvolutionDimType::OutputImage:
+      return "OI";
+    case ConvolutionDimType::OutputChannel:
+      return "OC";
+    case ConvolutionDimType::InputChannel:
+      return "IC";
+    case ConvolutionDimType::FilterLoop:
+      return "FL";
+    case ConvolutionDimType::Depth:
+      return "D";
+  }
+  llvm_unreachable("unhandled dim type");
+  return "";
+}
+
+static SmallVector<StringRef> getShortDimTypeNames(
+        DenseMap<unsigned, ConvolutionDimType> convDimMap,
+        SmallVector<int64_t> dimOrder) {
+  SmallVector<StringRef> typeNames;
+  for (auto dim : dimOrder)
+    typeNames.push_back(getShortDimTypeName(convDimMap[dim]));
+  return typeNames;
+}
+
+static SmallVector<int64_t> getIm2ColDimOrder(AffineMap inputMap,
+        DenseMap<unsigned, ConvolutionDimType> convDimMap,
+        SmallVector<int64_t> filterDimOrder, SmallVector<int64_t> outputDimOrder) {
+  bool innerDimIsConvolved = !inputMap.getResults().back().isa<AffineDimExpr>();
+  SmallVector<int64_t> inputDimOrder;
+  int outputIndex = 0;
+  int filterIndex = 0;
+  for (int filterEnd = filterDimOrder.size(), outputEnd = outputDimOrder.size();
+          filterIndex < filterEnd || outputIndex < outputEnd;) {
+    if (outputIndex >= outputEnd) {
+      for (;filterIndex < filterEnd; filterIndex++)
+        inputDimOrder.push_back(filterDimOrder[filterIndex]);
+      break;
+    }
+    if (filterIndex >= filterEnd) {
+      for (;outputIndex < outputEnd; outputIndex++)
+        inputDimOrder.push_back(outputDimOrder[outputIndex]);
+      break;
+    }
+    if (isa<ConvolutionDimType::Batch>(convDimMap[outputDimOrder[outputIndex]])) {
+      inputDimOrder.push_back(outputDimOrder[outputIndex++]);
+      continue;
+    }
+    if (innerDimIsConvolved) {
+      if (isa<ConvolutionDimType::FilterLoop,
+              ConvolutionDimType::InputChannel>(convDimMap[filterDimOrder[filterIndex]])) {
+        inputDimOrder.push_back(filterDimOrder[filterIndex++]);
+        continue;
+      }
+      if (isa<ConvolutionDimType::OutputImage>(convDimMap[outputDimOrder[outputIndex]])) {
+        inputDimOrder.push_back(outputDimOrder[outputIndex++]);
+        continue;
+      }
+    } else {
+      if (isa<ConvolutionDimType::OutputImage>(convDimMap[outputDimOrder[outputIndex]])) {
+        inputDimOrder.push_back(outputDimOrder[outputIndex++]);
+        continue;
+      }
+      if (isa<ConvolutionDimType::FilterLoop,
+              ConvolutionDimType::InputChannel>(convDimMap[filterDimOrder[filterIndex]])) {
+        inputDimOrder.push_back(filterDimOrder[filterIndex++]);
+        continue;
+      }
+    }
+    // Else it is necessarily an OutputChannel for both so increment both indices.
+    filterIndex++;
+    outputIndex++;
+  }
+  return inputDimOrder;
+}
+
+
+FailureOr<std::pair<Operation *, Operation *>>
+rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
+
+  mlir::linalg::detail::ConvolutionDimensions dimensions;
+  if (!linalg::detail::getMatchConvolutionMessage(
+              linalg::detail::isConvolutionInterfaceImpl(genericOp, &dimensions)).empty())
+    return failure();
+
+  if (dimensions.outputImage.size() < 2 || dimensions.filterLoop.size() < 2)
+    return failure();
+
+  assert(dimensions.outputImage.size() == dimensions.filterLoop.size());
+
+  auto inputType = genericOp.getInputs()[0].getType().cast<ShapedType>();
+  auto filterType = genericOp.getInputs()[1].getType().cast<ShapedType>();
+  auto outputType = genericOp.getOutputs()[0].getType().cast<ShapedType>();
+
+  if (!filterType.hasStaticShape())
+    return rewriter.notifyMatchFailure(
+        genericOp, "expected a static shape for the filter");
+
+  if (!inputType.hasStaticShape())
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "expected a static shape for the input");
+
+  // TODO: Support dilation.
+  if (!llvm::all_of(
+      dimensions.dilations, [](unsigned element) { return element == 1; }))
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "expected all ones for dilations");
+
+  auto loc = genericOp.getLoc();
+  MLIRContext *context = rewriter.getContext();
+
+  Value input = genericOp.getInputs()[0];
+  Value filter = genericOp.getInputs()[1];
+  Value output = genericOp.getOutputs()[0];
+
+  auto dimSizes = genericOp.getStaticLoopRanges();
+  auto convDimMap = getConvolutionDimMap(dimensions);
+
+  auto indexingMaps = genericOp.getIndexingMapsArray();
+  AffineMap inputMap = indexingMaps[0];
+  AffineMap filterMap = indexingMaps[1];
+  AffineMap outputMap = indexingMaps[2];
+
+  SmallVector<int64_t> filterDimOrder = getDimOrder(filterMap);
+  SmallVector<int64_t> outputDimOrder = getDimOrder(outputMap);
+  SmallVector<int64_t> im2ColDimOrder = getIm2ColDimOrder(
+          inputMap, convDimMap, filterDimOrder, outputDimOrder);
+
+  LLVM_DEBUG({
+    DBGS() << "im2col: Selected dimension orders.\n";
+    llvm::interleaveComma(im2ColDimOrder, DBGS() << "im2ColDimOrder: ");
+    llvm::dbgs() << "\n";
+    llvm::interleaveComma(getShortDimTypeNames(convDimMap, im2ColDimOrder),
+            DBGS() << "im2ColDimTypes: ");
+    llvm::dbgs() << "\n";
+    llvm::interleaveComma(filterDimOrder, DBGS() << "filterDimOrder: ");
+    llvm::dbgs() << "\n";
+    llvm::interleaveComma(getShortDimTypeNames(convDimMap, filterDimOrder),
+            DBGS() << "filterDimTypes: ");
+    llvm::dbgs() << "\n";
+    llvm::interleaveComma(outputDimOrder, DBGS() << "outputDimOrder: ");
+    llvm::dbgs() << "\n";
+    llvm::interleaveComma(getShortDimTypeNames(convDimMap, outputDimOrder),
+        DBGS() << "outputDimTypes: ");
+    llvm::dbgs() << "\n";
+  });
+
+  SmallVector<ReassociationIndices> im2ColReassocIndices;
+  SmallVector<int64_t> im2ColShape;
+  SmallVector<ReassociationIndices> filterReassocIndices;
+  SmallVector<int64_t> filterShape;
+  SmallVector<ReassociationIndices> outputReassocIndices;
+  SmallVector<int64_t> outputShape;
+
+  auto findDimPosFromIndex = [](int64_t dimPos, int64_t index, SmallVector<int64_t> dimOrder) {
+    for (int i = index, e = dimOrder.size(); i < e; i++) {
+      if (dimOrder[i] == dimPos)
+        return i;
+    }
+    return static_cast<int>(dimOrder.size());
+  };
+
+  auto updateReassociationAndShapeVecs = [&](int64_t dim, int64_t prevIndex,
+          int64_t nextIndex, bool prevCollapsible, SmallVector<int64_t> dimOrder,
+          SmallVector<int64_t> &shapeVec, SmallVector<ReassociationIndices> &reassociationMap) {
+    auto dimSize = dimSizes[dim];
+    if (prevIndex == nextIndex && prevCollapsible) {
+      im2ColReassocIndices.back().push_back(dim);
+      im2ColShape[im2ColShape.size() - 1] *= dimSize;
+      reassociationMap.back().push_back(prevIndex);
+      shapeVec[shapeVec.size() - 1] *= dimSize;
+    } else {
+      im2ColReassocIndices.push_back({dim});
+      im2ColShape.push_back(dimSize);
+      for (auto i = prevIndex; i < nextIndex + 1; i++) {
+        reassociationMap.push_back({i});
+        shapeVec.push_back(dimSizes[dimOrder[i]]);
+      }
+    }
+  };
+
+  int64_t filterDimPos = 0;
+  int64_t outputDimPos = 0;
+  bool prevWasFilterCollapsible = false;
+  bool prevWasOutputCollapsible = false;
+  for (auto dim : im2ColDimOrder) {
+    if (isa<ConvolutionDimType::InputChannel,
+            ConvolutionDimType::FilterLoop>(convDimMap[dim])) {
+      prevWasOutputCollapsible = false;
+      auto nextFilter = findDimPosFromIndex(dim, filterDimPos, filterDimOrder);
+      if (nextFilter >= filterDimOrder.size())
+        return rewriter.notifyMatchFailure(genericOp,
+                                           "filter layout does not match im2col layout");
+      updateReassociationAndShapeVecs(dim, filterDimPos, nextFilter,
+              prevWasFilterCollapsible, filterDimOrder, filterShape, filterReassocIndices);
+
+      filterDimPos = nextFilter + 1;
+      prevWasFilterCollapsible = true;
+      continue;
+    } else if (isa<ConvolutionDimType::OutputImage>(convDimMap[dim])) {
+      prevWasFilterCollapsible = false;
+      auto nextOutput = findDimPosFromIndex(dim, outputDimPos, outputDimOrder);
+      if (nextOutput >= outputDimOrder.size())
+        return rewriter.notifyMatchFailure(genericOp,
+                                           "output layout does not match im2col layout");
+      updateReassociationAndShapeVecs(dim, outputDimPos, nextOutput,
+              prevWasOutputCollapsible, outputDimOrder, outputShape, outputReassocIndices);
+    
+      outputDimPos = nextOutput + 1;
+      prevWasOutputCollapsible = true;
+      continue;
+    }
+    prevWasFilterCollapsible = false;
+    prevWasOutputCollapsible = false;
+  }
+  for (int i = filterDimPos, e = filterDimOrder.size(); i < e; i++) {
+    filterReassocIndices.push_back({i});
+    filterShape.push_back(dimSizes[filterDimOrder[i]]);
+  }
+  for (int i = outputDimPos, e = outputDimOrder.size(); i < e; i++) {
+    outputReassocIndices.push_back({i});
+    outputShape.push_back(dimSizes[outputDimOrder[i]]);
+  }
+
+  auto reshapedFilterType =
+      RankedTensorType::get(filterShape, filterType.getElementType());
+  Value reshapedFilter = rewriter.create<tensor::CollapseShapeOp>(
+      loc, reshapedFilterType, filter, filterReassocIndices);
+
+  auto reshapedOutputType =
+      RankedTensorType::get(outputShape, outputType.getElementType());
+  Value reshapedOutput = rewriter.create<tensor::CollapseShapeOp>(
+      loc, reshapedOutputType, output, outputReassocIndices);
+
+  // Convert the input to a (BKN) tensor.
+  Value colTensor = rewriter.create<tensor::EmptyOp>(
+      loc, im2ColShape, inputType.getElementType());
+
+  auto nloops = im2ColShape.size();
+
+  auto parallel = utils::IteratorType::parallel;
+  auto reduction = utils::IteratorType::reduction;
+  SmallVector<utils::IteratorType, 3> img2colIterators(nloops, parallel);
+
+  SmallVector<AffineMap, 4> img2colIndexingMaps = {
+      AffineMap::getMultiDimIdentityMap(nloops, context)};
+
+  auto img2ColTensor = rewriter.create<linalg::GenericOp>(
+      loc, colTensor.getType(),
+      /*inputs=*/ValueRange{}, /*outputs=*/colTensor, img2colIndexingMaps,
+      img2colIterators,
+      [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+        // Get the iterators named based on the matmul (batch?, m, k).
+        DenseMap<int64_t, Value> indexMap;
+        for (auto [index, group] : llvm::enumerate(im2ColReassocIndices)) {
+          Value iterator = nestedBuilder.create<linalg::IndexOp>(loc, index);
+          if (group.size() == 1) {
+            indexMap[group[0]] = iterator;
+            continue;
+          }
+          SmallVector<int64_t> groupShape;
+          for (auto dim : group) groupShape.push_back(dimSizes[dim]);
+          auto unrolledIndices = unrollIndex(nestedBuilder, nestedLoc, iterator, groupShape);
+          for (auto [dim, unrolledIndex] : llvm::zip_equal(group, unrolledIndices))
+            indexMap[dim] = unrolledIndex;
+        }
+
+        SmallVector<AffineExpr> convolvedExprs;
+        for (auto expr : inputMap.getResults())
+          if (!expr.isa<AffineDimExpr>()) convolvedExprs.push_back(expr);
+
+        SmallVector<Value> convolvedIndices;
+        for (auto [imageDim, filterDim, expr, stride] : llvm::zip_equal(
+                    dimensions.outputImage, dimensions.filterLoop,
+                    convolvedExprs, dimensions.strides)) {
+          assert(expr.isFunctionOfDim(imageDim) && expr.isFunctionOfDim(filterDim)
+                  && "convolved indices mismatch with indexing order in source map");
+          convolvedIndices.push_back(getConvolvedIndex(nestedBuilder, nestedLoc,
+                      indexMap[imageDim], indexMap[filterDim], stride));
+        }
+
+        SmallVector<Value> extractionIndices;
+        unsigned convolvedIndexDim = 0;
+        for (auto expr : inputMap.getResults()) {
+          auto dimExpr = expr.dyn_cast<AffineDimExpr>();
+          if (!dimExpr) {
+            extractionIndices.push_back(convolvedIndices[convolvedIndexDim++]);
+            continue;
+          }
+          extractionIndices.push_back(indexMap[dimExpr.getPosition()]);
+        }
+
+        Value inputVal = nestedBuilder.create<tensor::ExtractOp>(
+                loc, input, extractionIndices);
+        nestedBuilder.create<linalg::YieldOp>(nestedLoc, inputVal);
+      });
+
+  auto getGroupedDimOrder = [](SmallVector<int64_t> dimOrder,
+                               SmallVector<ReassociationIndices> reassociationMap) {
+    SmallVector<ReassociationIndices> groupedDimOrder;
+    for (auto group : reassociationMap) {
+      ReassociationIndices dims;
+      for (auto i : group) dims.push_back(dimOrder[i]);
+      groupedDimOrder.push_back(dims);
+    }
+    return groupedDimOrder;
+  };
+  SmallVector<ReassociationIndices> groupedFilterDimOrder =
+      getGroupedDimOrder(filterDimOrder, filterReassocIndices);
+  SmallVector<ReassociationIndices> groupedOutputDimOrder =
+      getGroupedDimOrder(outputDimOrder, outputReassocIndices);
+
+  LLVM_DEBUG({
+    DBGS() << "im2col: Selected dimension groupings.\n";
+    DBGS() << "im2ColDimMap: ";
+    for (auto group : im2ColReassocIndices) {
+      llvm::dbgs() << "{";
+      llvm::interleaveComma(group, llvm::dbgs());
+      llvm::dbgs() << "} ";
+    }
+    llvm::dbgs() << "\n";
+    DBGS() << "filterDimMap: ";
+    for (auto group : groupedFilterDimOrder) {
+      llvm::dbgs() << "{";
+      llvm::interleaveComma(group, llvm::dbgs());
+      llvm::dbgs() << "} ";
+    }
+    llvm::dbgs() << "\n";
+    DBGS() << "outputDimMap: ";
+    for (auto group : groupedOutputDimOrder) {
+      llvm::dbgs() << "{";
+      llvm::interleaveComma(group, llvm::dbgs());
+      llvm::dbgs() << "} ";
+    }
+    llvm::dbgs() << "\n";
+  });
+
+  DenseMap<int64_t, AffineExpr> leadingGroupDimToIterationDim;
+  SmallVector<utils::IteratorType> iteratorTypes;
+  int iterationDim = 0;
+
+  auto advanceOperandIndex = [&](int &l, int r, SmallVector<ReassociationIndices> groupedDimOrder) {
+    while (l < groupedDimOrder.size() &&
+           leadingGroupDimToIterationDim.count(groupedDimOrder[l][0]))
+      l++;
+    for (; l < r; l++) {
+      auto groupDim = groupedDimOrder[l][0];
+      if (leadingGroupDimToIterationDim.count(groupDim))
+        continue;
+      leadingGroupDimToIterationDim[groupDim] = rewriter.getAffineDimExpr(iterationDim++);
+      if (isa<ConvolutionDimType::FilterLoop,
+              ConvolutionDimType::InputChannel>(convDimMap[groupDim]))
+        iteratorTypes.push_back(reduction);
+      else
+        iteratorTypes.push_back(parallel);
+    }
+  };
+
+  // If the inner most dim of the input is a reduced dimension, assume we should
+  // keep the filter on the right hand side of the matrix multiplication.
+  bool filterRHS = isa<ConvolutionDimType::FilterLoop,
+                       ConvolutionDimType::InputChannel>(convDimMap[im2ColDimOrder.back()]);
+
+  int inputIndex = 0;
+  int filterIndex = 0;
+  int outputIndex = 0;
+  int inputEnd = im2ColShape.size();
+  int filterEnd = filterShape.size();
+  int outputEnd = outputShape.size();
+  while (inputIndex < inputEnd &&
+         filterIndex < filterEnd &&
+         outputIndex < outputEnd) {
+    ConvolutionDimType lhsDimType = filterRHS ? convDimMap[im2ColReassocIndices[inputIndex][0]]
+                                              : convDimMap[groupedFilterDimOrder[filterIndex][0]];
+    bool isLastLhsDim = filterRHS ? im2ColReassocIndices.size() - 1 == inputIndex
+                                  : filterReassocIndices.size() - 1 == filterIndex;
+    LLVM_DEBUG({
+      DBGS() << "Current dim to iteration dim map:\n";
+      for (auto [key, value] : leadingGroupDimToIterationDim) {
+        DBGS() << key << " -> " << value << "\n";
+      }
+      DBGS() << "Input Index: " << inputIndex << "\n";
+      DBGS() << "Filter Index: " << filterIndex << "\n";
+      DBGS() << "Output Index: " << outputIndex << "\n";
+      DBGS() << "Is last LHS Dim: " << (isLastLhsDim ? "true" : "false") << "\n";
+      DBGS() << "LHS Dim Type: " << getShortDimTypeName(lhsDimType) << "\n";
+    });
+    if (isLastLhsDim && isa<ConvolutionDimType::FilterLoop,
+                            ConvolutionDimType::InputChannel>(lhsDimType))
+      break;
+
+    if (groupedFilterDimOrder[filterIndex][0] == im2ColReassocIndices[inputIndex][0]) {
+      advanceOperandIndex(filterIndex, filterIndex + 1, groupedFilterDimOrder);
+    } else if (groupedOutputDimOrder[outputIndex][0] == groupedFilterDimOrder[filterIndex][0]) {
+      advanceOperandIndex(outputIndex, outputIndex + 1, groupedOutputDimOrder);
+    } else if (groupedOutputDimOrder[outputIndex][0] == im2ColReassocIndices[inputIndex][0]) {
+      advanceOperandIndex(inputIndex, inputIndex + 1, im2ColReassocIndices);
+    } else {
+      // Greedily prefer iterating over dims of the output.
+      advanceOperandIndex(outputIndex, outputIndex + 1, groupedOutputDimOrder);
+    }
+
+    // Catch up all indices based on the iterator dim map.
+    advanceOperandIndex(outputIndex, outputIndex, groupedOutputDimOrder);
+    advanceOperandIndex(filterIndex, filterIndex, groupedFilterDimOrder);
+    advanceOperandIndex(inputIndex, inputIndex, im2ColReassocIndices);
+  }
+
+  // Fill in any missing iteration dimensions.
+  advanceOperandIndex(outputIndex, outputEnd, groupedOutputDimOrder);
+  advanceOperandIndex(filterIndex, filterEnd, groupedFilterDimOrder);
+  advanceOperandIndex(inputIndex, inputEnd, im2ColReassocIndices);
+
+  SmallVector<AffineExpr> inputExprs;
+  SmallVector<AffineExpr> filterExprs;
+  SmallVector<AffineExpr> outputExprs;
+
+  for (auto group : im2ColReassocIndices)
+    inputExprs.push_back(leadingGroupDimToIterationDim[group[0]]);
+  for (auto group : groupedFilterDimOrder)
+    filterExprs.push_back(leadingGroupDimToIterationDim[group[0]]);
+  for (auto group : groupedOutputDimOrder)
+    outputExprs.push_back(leadingGroupDimToIterationDim[group[0]]);
+
+  auto newInputMap = AffineMap::get(iterationDim, 0, inputExprs, context);
+  auto newFilterMap = AffineMap::get(iterationDim, 0, filterExprs, context);
+  auto newOutputMap = AffineMap::get(iterationDim, 0, outputExprs, context);
+
+  LLVM_DEBUG({
+    DBGS() << "im2col: Indexing maps.\n";
+    if (filterRHS) {
+      DBGS() << "im2ColMap: " << newInputMap << "\n";
+      DBGS() << "filterMap: " << newFilterMap << "\n";
+    } else {
+      DBGS() << "filterMap: " << newFilterMap << "\n";
+      DBGS() << "im2ColMap: " << newInputMap << "\n";
+    }
+    DBGS() << "outputMap: " << newOutputMap << "\n";
+  });
+
+  auto newGenericOp = rewriter.create<linalg::GenericOp>(
+      loc, reshapedOutputType,
+      /*inputs=*/filterRHS ? ValueRange{img2ColTensor.getResult(0), reshapedFilter}
+                        : ValueRange{reshapedFilter, img2ColTensor.getResult(0)},
+      /*outputs=*/ValueRange{reshapedOutput},
+      filterRHS ? ArrayRef<AffineMap>{newInputMap, newFilterMap, newOutputMap}
+                : ArrayRef<AffineMap>{newFilterMap, newInputMap, newOutputMap}, iteratorTypes);
+  IRMapping mapper;
+  genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
+
+  if (!filterRHS) swapMatmulBlockArgs(newGenericOp);
+
+  Value result = newGenericOp.getResults().front();
+
+  auto reshapedResult = rewriter.create<tensor::ExpandShapeOp>(
+      loc, outputType, result, outputReassocIndices);
+
+  rewriter.replaceOp(genericOp, ArrayRef<Value>{reshapedResult});
+
+  return std::make_pair(img2ColTensor.getOperation(),
+                        reshapedResult.getOperation());
+}
+
+
 
 FailureOr<std::pair<Operation *, Operation *>>
 rewriteInIm2Col(RewriterBase &rewriter, linalg::Conv2DNhwcHwcfOp convOp) {
@@ -530,12 +1119,25 @@ public:
     return success();
   }
 };
+
+class ConvertConv2DGeneric final
+    : public OpRewritePattern<linalg::GenericOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::GenericOp convOp,
+                                PatternRewriter &rewriter) const override {
+    if (failed(rewriteInIm2Col(rewriter, convOp)))
+      return failure();
+    return success();
+  }
+};
 } // end anonymous namespace
 
 void populateConvertConv2DToImg2ColPatterns(RewritePatternSet &patterns) {
   MLIRContext *context = patterns.getContext();
   patterns.insert<ConvertConv2DNhwcHwcf, ConvertDepthwiseConv2DNhwcHwc,
-                  ConvertConv2DNchwFchw>(context);
+                  ConvertConv2DNchwFchw, ConvertConv2DGeneric>(context);
 }
 } // end namespace linalg
 } // end namespace mlir
