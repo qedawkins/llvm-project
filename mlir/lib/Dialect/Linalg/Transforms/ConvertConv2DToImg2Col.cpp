@@ -157,7 +157,6 @@ static SmallVector<int64_t> getIm2ColDimOrder(AffineMap inputMap,
 
 FailureOr<std::pair<Operation *, Operation *>>
 rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
-
   mlir::linalg::detail::ConvolutionDimensions dimensions;
   if (!linalg::detail::getMatchConvolutionMessage(
               linalg::detail::isConvolutionInterfaceImpl(genericOp, &dimensions)).empty())
@@ -289,6 +288,15 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
       outputDimPos = nextOutput + 1;
       prevWasOutputCollapsible = true;
       continue;
+    } else if (isa<ConvolutionDimType::Batch>(convDimMap[dim])) {
+      auto nextOutput = findDimPosFromIndex(dim, outputDimPos, outputDimOrder);
+      if (nextOutput >= outputDimOrder.size())
+        return rewriter.notifyMatchFailure(genericOp,
+                                           "output layout does not match im2col layout");
+      updateReassociationAndShapeVecs(dim, outputDimPos, nextOutput,
+              prevWasOutputCollapsible, outputDimOrder, outputShape, outputReassocIndices);
+
+      outputDimPos = nextOutput + 1;
     }
     prevWasFilterCollapsible = false;
     prevWasOutputCollapsible = false;
