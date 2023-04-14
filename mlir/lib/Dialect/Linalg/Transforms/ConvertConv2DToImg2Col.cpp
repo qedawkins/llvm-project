@@ -9,7 +9,9 @@
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
@@ -25,8 +27,15 @@
 #define DEBUG_TYPE "convert-to-img2col"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 
+using namespace mlir::linalg::detail;
+
 namespace mlir {
 namespace linalg {
+
+//===----------------------------------------------------------------------===//
+// Im2Col Utilities
+//===----------------------------------------------------------------------===//
+
 static bool hasAllOneValues(DenseIntElementsAttr attr) {
   return llvm::all_of(
       attr, [](APInt element) { return element.getSExtValue() == 1; });
@@ -75,140 +84,11 @@ static Value getConvolvedIndex(OpBuilder &b, Location loc, Value oIndex,
   return makeComposedAffineApply(b, loc, convMap, ValueRange{oIndex, fIndex});
 }
 
-static void swapMatmulBlockArgs(linalg::GenericOp genericOp) {
-  Value leftOperand = genericOp.getRegion().front().getArgument(0);
-  Value rightOperand = genericOp.getRegion().front().getArgument(1);
-  auto leftUses = leftOperand.getUses();
-  auto rightUses = rightOperand.getUses();
-  leftOperand.replaceUsesWithIf(rightOperand, [&](OpOperand &use) {
-    return llvm::any_of(leftUses, [&](OpOperand &newUse) {
-              return newUse.getOwner() == use.getOwner() &&
-                    newUse.getOperandNumber() == use.getOperandNumber();
-            });
-  });
-  rightOperand.replaceUsesWithIf(leftOperand, [&](OpOperand &use) {
-    return llvm::any_of(rightUses, [&](OpOperand &newUse) {
-              return newUse.getOwner() == use.getOwner() &&
-                    newUse.getOperandNumber() == use.getOperandNumber();
-            });
-  });
-  llvm::SmallDenseSet<Operation *, 2> leftOps;
-  llvm::SmallDenseSet<Operation *, 2> rightOps;
-  for (Operation *user : leftOperand.getUsers())
-    leftOps.insert(user);
-  for (Operation *user : rightOperand.getUsers())
-    rightOps.insert(user);
-
-  for (Operation &op : genericOp.getRegion().front()) {
-    if (leftOps.contains(&op) || rightOps.contains(&op))
-      continue;
-
-    int leftIdx = -1;
-    int rightIdx = -1;
-    for (auto &operand : op.getOpOperands()) {
-      auto definingOp = operand.get().getDefiningOp();
-      if (!definingOp) continue;
-      if (leftOps.contains(definingOp)) {
-        assert(leftIdx < 0 && "Found non-unary or binary op");
-        leftIdx = operand.getOperandNumber();
-      }
-
-      if (rightOps.contains(definingOp)) {
-        assert(rightIdx < 0 && "Found non-unary or binary op");
-        rightIdx = operand.getOperandNumber();
-      }
-    }
-    if (leftIdx >= 0 && rightIdx >= 0) {
-      auto leftVal = op.getOpOperand(leftIdx).get();
-      auto rightVal = op.getOpOperand(rightIdx).get();
-      op.setOperand(leftIdx, rightVal);
-      op.setOperand(rightIdx, leftVal);
-      continue;
-    }
-    if (leftIdx >= 0)
-      leftOps.insert(&op);
-    if (rightIdx >= 0)
-      rightOps.insert(&op);
-  }
-}
-
 static SmallVector<int64_t> getDimOrder(AffineMap map) {
   SmallVector<int64_t> dimOrder;
   for (AffineExpr expr : map.getResults())
     dimOrder.push_back(expr.cast<AffineDimExpr>().getPosition());
   return dimOrder;
-}
-
-enum class ConvolutionDimType {
-  Batch = 0,
-  OutputImage,
-  OutputChannel,
-  FilterLoop,
-  InputChannel,
-  Depth
-};
-
-static ConvolutionDimType getConvolutionDimType(unsigned dim,
-        mlir::linalg::detail::ConvolutionDimensions convDims) {
-  if (llvm::is_contained(convDims.batch, dim))
-    return ConvolutionDimType::Batch;
-  if (llvm::is_contained(convDims.outputImage, dim))
-    return ConvolutionDimType::OutputImage;
-  if (llvm::is_contained(convDims.outputChannel, dim))
-    return ConvolutionDimType::OutputChannel;
-  if (llvm::is_contained(convDims.filterLoop, dim))
-    return ConvolutionDimType::FilterLoop;
-  if (llvm::is_contained(convDims.depth, dim))
-    return ConvolutionDimType::Depth;
-  llvm_unreachable("unhandled dim type");
-  return ConvolutionDimType::Batch;
-}
-
-template <ConvolutionDimType DimType>
-[[nodiscard]] static inline bool isa(const ConvolutionDimType type) {
-  return type == DimType;
-}
-
-template<ConvolutionDimType First, ConvolutionDimType Second, ConvolutionDimType... Rest>
-[[nodiscard]] static inline bool isa(const ConvolutionDimType type) {
-    return (isa<First>(type) || isa<Second, Rest...>(type));
-}
-
-static DenseMap<unsigned, ConvolutionDimType> getConvolutionDimMap(
-        mlir::linalg::detail::ConvolutionDimensions convDims) {
-  DenseMap<unsigned, ConvolutionDimType> convDimMap;
-  for (unsigned b : convDims.batch)
-    convDimMap[b] = ConvolutionDimType::Batch;
-  for (unsigned oi : convDims.outputImage)
-    convDimMap[oi] = ConvolutionDimType::OutputImage;
-  for (unsigned oc : convDims.outputChannel)
-    convDimMap[oc] = ConvolutionDimType::OutputChannel;
-  for (unsigned ic : convDims.inputChannel)
-    convDimMap[ic] = ConvolutionDimType::InputChannel;
-  for (unsigned fl : convDims.filterLoop)
-    convDimMap[fl] = ConvolutionDimType::FilterLoop;
-  for (unsigned d : convDims.depth)
-    convDimMap[d] = ConvolutionDimType::Depth;
-  return convDimMap;
-}
-
-static StringRef getShortDimTypeName(ConvolutionDimType dimType) {
-  switch (dimType) {
-    case ConvolutionDimType::Batch:
-      return "B";
-    case ConvolutionDimType::OutputImage:
-      return "OI";
-    case ConvolutionDimType::OutputChannel:
-      return "OC";
-    case ConvolutionDimType::InputChannel:
-      return "IC";
-    case ConvolutionDimType::FilterLoop:
-      return "FL";
-    case ConvolutionDimType::Depth:
-      return "D";
-  }
-  llvm_unreachable("unhandled dim type");
-  return "";
 }
 
 static SmallVector<StringRef> getShortDimTypeNames(
@@ -271,6 +151,9 @@ static SmallVector<int64_t> getIm2ColDimOrder(AffineMap inputMap,
   return inputDimOrder;
 }
 
+//===----------------------------------------------------------------------===//
+// Im2Col Rewrite Patterns
+//===----------------------------------------------------------------------===//
 
 FailureOr<std::pair<Operation *, Operation *>>
 rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
@@ -311,7 +194,7 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
   Value output = genericOp.getOutputs()[0];
 
   auto dimSizes = genericOp.getStaticLoopRanges();
-  auto convDimMap = getConvolutionDimMap(dimensions);
+  auto convDimMap = getConvolutionDimTypeMap(dimensions);
 
   auto indexingMaps = genericOp.getIndexingMapsArray();
   AffineMap inputMap = indexingMaps[0];
@@ -645,7 +528,7 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
   IRMapping mapper;
   genericOp.getRegion().cloneInto(&newGenericOp.getRegion(), mapper);
 
-  if (!filterRHS) swapMatmulBlockArgs(newGenericOp);
+  if (!filterRHS) swapGenericBinaryInputArgs(newGenericOp);
 
   Value result = newGenericOp.getResults().front();
 
@@ -657,8 +540,6 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp) {
   return std::make_pair(img2ColTensor.getOperation(),
                         reshapedResult.getOperation());
 }
-
-
 
 FailureOr<std::pair<Operation *, Operation *>>
 rewriteInIm2Col(RewriterBase &rewriter, linalg::Conv2DNhwcHwcfOp convOp) {

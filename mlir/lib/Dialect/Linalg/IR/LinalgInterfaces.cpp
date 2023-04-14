@@ -21,6 +21,7 @@
 
 using namespace mlir;
 using namespace mlir::linalg;
+using namespace mlir::linalg::detail;
 
 /// Include the definitions of the copy operation interface.
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.cpp.inc"
@@ -495,6 +496,48 @@ LogicalResult mlir::linalg::detail::verifyConvolutionInterface(Operation *op) {
   if (res != MatchConvolutionResult::Success)
     return op->emitError(getMatchConvolutionMessage(res));
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Convolution dimension helpers
+//===----------------------------------------------------------------------===//
+
+DenseMap<unsigned, ConvolutionDimType>
+mlir::linalg::detail::getConvolutionDimTypeMap(
+        ConvolutionDimensions convDims) {
+  DenseMap<unsigned, ConvolutionDimType> convDimMap;
+  for (unsigned b : convDims.batch)
+    convDimMap[b] = ConvolutionDimType::Batch;
+  for (unsigned oi : convDims.outputImage)
+    convDimMap[oi] = ConvolutionDimType::OutputImage;
+  for (unsigned oc : convDims.outputChannel)
+    convDimMap[oc] = ConvolutionDimType::OutputChannel;
+  for (unsigned ic : convDims.inputChannel)
+    convDimMap[ic] = ConvolutionDimType::InputChannel;
+  for (unsigned fl : convDims.filterLoop)
+    convDimMap[fl] = ConvolutionDimType::FilterLoop;
+  for (unsigned d : convDims.depth)
+    convDimMap[d] = ConvolutionDimType::Depth;
+  return convDimMap;
+}
+
+StringRef mlir::linalg::detail::getShortDimTypeName(ConvolutionDimType dimType) {
+  switch (dimType) {
+    case ConvolutionDimType::Batch:
+      return "B";
+    case ConvolutionDimType::OutputImage:
+      return "OI";
+    case ConvolutionDimType::OutputChannel:
+      return "OC";
+    case ConvolutionDimType::InputChannel:
+      return "IC";
+    case ConvolutionDimType::FilterLoop:
+      return "FL";
+    case ConvolutionDimType::Depth:
+      return "D";
+  }
+  llvm_unreachable("unhandled dim type");
+  return "";
 }
 
 //===----------------------------------------------------------------------===//
