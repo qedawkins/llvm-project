@@ -103,10 +103,10 @@ static SmallVector<StringRef> getShortDimTypeNames(
 static SmallVector<int64_t> getIm2ColDimOrder(AffineMap inputMap,
         DenseMap<unsigned, ConvolutionDimType> convDimMap,
         SmallVector<int64_t> filterDimOrder, SmallVector<int64_t> outputDimOrder) {
-  bool innerDimIsConvolved = !inputMap.getResults().back().isa<AffineDimExpr>();
   SmallVector<int64_t> inputDimOrder;
   int outputIndex = 0;
   int filterIndex = 0;
+  bool foundInputChannel = false;
   for (int filterEnd = filterDimOrder.size(), outputEnd = outputDimOrder.size();
           filterIndex < filterEnd || outputIndex < outputEnd;) {
     if (outputIndex >= outputEnd) {
@@ -123,9 +123,8 @@ static SmallVector<int64_t> getIm2ColDimOrder(AffineMap inputMap,
       inputDimOrder.push_back(outputDimOrder[outputIndex++]);
       continue;
     }
-    if (innerDimIsConvolved) {
-      if (isa<ConvolutionDimType::FilterLoop,
-              ConvolutionDimType::InputChannel>(convDimMap[filterDimOrder[filterIndex]])) {
+    if (foundInputChannel) {
+      if (isa<ConvolutionDimType::FilterLoop>(convDimMap[filterDimOrder[filterIndex]])) {
         inputDimOrder.push_back(filterDimOrder[filterIndex++]);
         continue;
       }
@@ -133,13 +132,21 @@ static SmallVector<int64_t> getIm2ColDimOrder(AffineMap inputMap,
         inputDimOrder.push_back(outputDimOrder[outputIndex++]);
         continue;
       }
+      if (isa<ConvolutionDimType::InputChannel>(convDimMap[filterDimOrder[filterIndex]])) {
+        inputDimOrder.push_back(filterDimOrder[filterIndex++]);
+        continue;
+      }
     } else {
+      if (isa<ConvolutionDimType::InputChannel>(convDimMap[filterDimOrder[filterIndex]])) {
+        inputDimOrder.push_back(filterDimOrder[filterIndex++]);
+        foundInputChannel = true;
+        continue;
+      }
       if (isa<ConvolutionDimType::OutputImage>(convDimMap[outputDimOrder[outputIndex]])) {
         inputDimOrder.push_back(outputDimOrder[outputIndex++]);
         continue;
       }
-      if (isa<ConvolutionDimType::FilterLoop,
-              ConvolutionDimType::InputChannel>(convDimMap[filterDimOrder[filterIndex]])) {
+      if (isa<ConvolutionDimType::FilterLoop>(convDimMap[filterDimOrder[filterIndex]])) {
         inputDimOrder.push_back(filterDimOrder[filterIndex++]);
         continue;
       }
