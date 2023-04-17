@@ -658,6 +658,67 @@ struct RankReducedInsertSliceOp : public OpRewritePattern<InsertOpTy> {
 };
 } // namespace
 
+namespace {
+/// Fold unpadded unit dimensions on `tensor.pad` ops.
+struct FoldTensorPadUnitExtents : public OpRewritePattern<tensor::PadOp> {
+  using OpRewritePattern<tensor::PadOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::PadOp padOp,
+                                PatternRewriter &rewriter) const override {
+    Value padValue = padOp.getConstantPaddingValue();
+    if (!padValue)
+      return failure();
+
+    RankedTensorType srcType = padOp.getSourceType();
+    RankedTensorType resultType = padOp.getResultType();
+    SmallVector<OpFoldResult> newLowPad;
+    SmallVector<OpFoldResult> newHighPad;
+    SmallVector<int64_t> collapsedSourceShape;
+    llvm::SmallBitVector paddedDims = padOp.getPaddedDims();
+    SmallVector<ReassociationIndices> reassociation;
+    ReassociationIndices curr;
+    for (auto [index, srcSize, resultSize, lowPad, highPad] :
+         llvm::zip_equal(llvm::seq<unsigned>(0, resultType.getRank()),
+                         srcType.getShape(), resultType.getShape(),
+                         padOp.getMixedLowPad(), padOp.getMixedHighPad())) {
+      curr.push_back(index);
+      if (!paddedDims.test(index) && resultSize == 1)
+        continue;
+      collapsedSourceShape.push_back(srcSize);
+      newLowPad.push_back(lowPad);
+      newHighPad.push_back(highPad);
+      reassociation.emplace_back(ReassociationIndices{});
+      std::swap(reassociation.back(), curr);
+    }
+    if (!curr.empty() && !reassociation.empty())
+      reassociation.back().append(curr.begin(), curr.end());
+
+    if (reassociation.size() == static_cast<size_t>(resultType.getRank()))
+      return failure();
+
+    Location loc = padOp.getLoc();
+
+    Value collapsedInput =
+        rewriter
+            .create<tensor::CollapseShapeOp>(
+                loc,
+                RankedTensorType::get(collapsedSourceShape,
+                                      srcType.getElementType()),
+                padOp.getSource(), reassociation)
+            .getResult();
+    auto newPadOp = rewriter.create<tensor::PadOp>(
+        loc, /*result=*/Type(), collapsedInput, newLowPad, newHighPad, padValue,
+        padOp.getNofold());
+    IRMapping bvm;
+    padOp.getRegion().cloneInto(&newPadOp.getRegion(), bvm);
+
+    rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(padOp, resultType,
+                                                       newPadOp, reassociation);
+    return success();
+  }
+};
+} // namespace
+
 /// Patterns that are used to canonicalize the use of unit-extent dims for
 /// broadcasting.
 void mlir::linalg::populateFoldUnitExtentDimsViaReshapesPatterns(
@@ -665,6 +726,7 @@ void mlir::linalg::populateFoldUnitExtentDimsViaReshapesPatterns(
   auto *context = patterns.getContext();
   patterns.add<ReplaceUnitExtents>(context,
                                    RankReductionStrategy::ReassociativeReshape);
+  patterns.add<FoldTensorPadUnitExtents>(context);
   // TODO: Patterns unrelated to unit dim folding should be factored out.
   patterns.add<FoldUnitDimLoops, RankReducedExtractSliceOp,
                RankReducedInsertSliceOp<tensor::InsertSliceOp>,
