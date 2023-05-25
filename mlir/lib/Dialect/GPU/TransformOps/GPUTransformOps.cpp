@@ -545,6 +545,7 @@ static DiagnosedSilenceableFailure rewriteOneForallCommonImpl(
     for (auto [id, mappingSize, availableMappingSize] : llvm::zip_equal(
              predicateIdOps, predicateMappingSizes, availableMappingSizes)) {
       if (mappingSize > availableMappingSize) {
+        forallOp.dump();
         return definiteFailureHelper(
             transformOp, forallOp,
             "Trying to map to fewer GPU threads than loop iterations but "

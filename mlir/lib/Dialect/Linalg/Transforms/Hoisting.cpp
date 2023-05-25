@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -179,7 +180,16 @@ void mlir::linalg::hoistRedundantVectorTransfers(func::FuncOp func) {
       loop.moveOutOfLoop(transferRead);
 
       // Hoist write after.
+      bool hasBarrier = isa<gpu::BarrierOp>(transferWrite->getNextNode());
       transferWrite->moveAfter(loop);
+      if (hasBarrier) {
+        OpBuilder b(transferWrite);
+        Operation *currNode = transferWrite;
+        while (isa<vector::TransferWriteOp>(currNode))
+          currNode = currNode->getNextNode();
+        b.setInsertionPoint(currNode);
+        b.create<gpu::BarrierOp>(transferWrite.getLoc());
+      }
 
       // Rewrite `loop` with new yields by cloning and erase the original loop.
       OpBuilder b(transferRead);
