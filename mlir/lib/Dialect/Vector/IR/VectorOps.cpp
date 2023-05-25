@@ -1130,6 +1130,48 @@ OpFoldResult vector::ExtractElementOp::fold(FoldAdaptor adaptor) {
   return srcElements[posIdx];
 }
 
+namespace {
+
+// Pattern to bubble extract element ops through elementwise ops.
+struct BubbleExtractElementThroughElementwise
+    : public OpRewritePattern<ExtractElementOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ExtractElementOp extractElementOp,
+                                PatternRewriter &rewriter) const override {
+    auto sourceOp = extractElementOp.getVector().getDefiningOp();
+    if (!sourceOp || !OpTrait::hasElementwiseMappableTraits(sourceOp) ||
+        sourceOp->getNumResults() != 1)
+      return failure();
+
+    if (!sourceOp->hasOneUse())
+      return failure();
+
+    Location loc = extractElementOp.getLoc();
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(sourceOp);
+    SmallVector<Value> extractedOperands;
+    for (auto operand : sourceOp->getOperands()) {
+      extractedOperands.push_back(rewriter.create<vector::ExtractElementOp>(
+          loc, operand, extractElementOp.getPosition()));
+    }
+    auto extractedOp =
+        rewriter
+            .create(loc, sourceOp->getName().getIdentifier(), extractedOperands,
+                    TypeRange{extractElementOp.getResult().getType()})
+            ->getResult(0);
+    rewriter.replaceOp(extractElementOp, extractedOp);
+    return success();
+  }
+};
+
+} // namespace
+
+void vector::ExtractElementOp::getCanonicalizationPatterns(
+    RewritePatternSet &results, MLIRContext *context) {
+  results.add<BubbleExtractElementThroughElementwise>(context);
+}
+
 //===----------------------------------------------------------------------===//
 // ExtractOp
 //===----------------------------------------------------------------------===//
