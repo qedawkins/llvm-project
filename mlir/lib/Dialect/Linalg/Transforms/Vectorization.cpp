@@ -939,7 +939,7 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
       getTensorExtractMemoryAccessPattern(extractOp, linalgOp);
 
   // 1. Handle gather access
-  if (memAccessKind == VectorMemoryAccessKind::Gather) {
+  if (memAccessKind == VectorMemoryAccessKind::Gather && !targetShape.empty()) {
     Value offset = calculateGatherOffset(rewriter, extractOp, bvm, targetShape);
 
     // Generate the gather load
@@ -955,7 +955,7 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
   // 2. Handle contiguous access.
   LDBG("Vectorised as contiguous load: " << extractOp);
   SmallVector<Value> transferReadIdxs;
-  auto resTrailingDim = resultType.getShape().back();
+  auto resTrailingDim = targetShape.empty() ? 0 : resultType.getShape().back();
   auto zero = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI32Type(), rewriter.getZeroAttr(rewriter.getI32Type()));
 
