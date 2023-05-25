@@ -438,24 +438,33 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp,
     llvm::dbgs() << "\n";
   });
 
-  DenseMap<int64_t, AffineExpr> leadingGroupDimToIterationDim;
-  SmallVector<utils::IteratorType> iteratorTypes;
-  int iterationDim = 0;
+  DenseMap<int64_t, int64_t> leadingGroupDimToParallelIterationDim;
+  DenseMap<int64_t, int64_t> leadingGroupDimToReductionIterationDim;
+  int parallelIterationDim = 0;
+  int reductionIterationDim = 0;
 
-  auto advanceOperandIndex = [&](int &l, int r, SmallVector<ReassociationIndices> groupedDimOrder) {
-    while (l < groupedDimOrder.size() &&
-           leadingGroupDimToIterationDim.count(groupedDimOrder[l][0]))
+  auto advanceOperandIndex = [&](int &l, int r,
+                                 SmallVector<ReassociationIndices>
+                                     groupedDimOrder) {
+    while (
+        l < groupedDimOrder.size() &&
+        (leadingGroupDimToParallelIterationDim.count(groupedDimOrder[l][0]) ||
+         leadingGroupDimToReductionIterationDim.count(groupedDimOrder[l][0])))
       l++;
     for (; l < r; l++) {
       auto groupDim = groupedDimOrder[l][0];
-      if (leadingGroupDimToIterationDim.count(groupDim))
+      if (leadingGroupDimToReductionIterationDim.count(groupDim) ||
+          leadingGroupDimToReductionIterationDim.count(groupDim)) {
         continue;
-      leadingGroupDimToIterationDim[groupDim] = rewriter.getAffineDimExpr(iterationDim++);
-      if (isa<ConvolutionDimType::FilterLoop,
-              ConvolutionDimType::InputChannel>(convDimMap[groupDim]))
-        iteratorTypes.push_back(reduction);
-      else
-        iteratorTypes.push_back(parallel);
+      }
+      if (isa<ConvolutionDimType::FilterLoop, ConvolutionDimType::InputChannel>(
+              convDimMap[groupDim])) {
+        leadingGroupDimToReductionIterationDim[groupDim] =
+            reductionIterationDim++;
+      } else {
+        leadingGroupDimToParallelIterationDim[groupDim] =
+            parallelIterationDim++;
+      }
     }
   };
 
@@ -470,27 +479,20 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp,
   int inputEnd = im2ColShape.size();
   int filterEnd = filterShape.size();
   int outputEnd = outputShape.size();
-  while (inputIndex < inputEnd &&
-         filterIndex < filterEnd &&
+  while (inputIndex < inputEnd && filterIndex < filterEnd &&
          outputIndex < outputEnd) {
-    ConvolutionDimType lhsDimType = filterRHS ? convDimMap[im2ColReassocIndices[inputIndex][0]]
-                                              : convDimMap[groupedFilterDimOrder[filterIndex][0]];
-    bool isLastLhsDim = filterRHS ? im2ColReassocIndices.size() - 1 == inputIndex
-                                  : filterReassocIndices.size() - 1 == filterIndex;
     LLVM_DEBUG({
       DBGS() << "Current dim to iteration dim map:\n";
-      for (auto [key, value] : leadingGroupDimToIterationDim) {
+      for (auto [key, value] : leadingGroupDimToParallelIterationDim) {
+        DBGS() << key << " -> " << value << "\n";
+      }
+      for (auto [key, value] : leadingGroupDimToReductionIterationDim) {
         DBGS() << key << " -> " << value << "\n";
       }
       DBGS() << "Input Index: " << inputIndex << "\n";
       DBGS() << "Filter Index: " << filterIndex << "\n";
       DBGS() << "Output Index: " << outputIndex << "\n";
-      DBGS() << "Is last LHS Dim: " << (isLastLhsDim ? "true" : "false") << "\n";
-      DBGS() << "LHS Dim Type: " << getShortDimTypeName(lhsDimType) << "\n";
     });
-    if (isLastLhsDim && isa<ConvolutionDimType::FilterLoop,
-                            ConvolutionDimType::InputChannel>(lhsDimType))
-      break;
 
     if (groupedFilterDimOrder[filterIndex][0] == im2ColReassocIndices[inputIndex][0]) {
       advanceOperandIndex(filterIndex, filterIndex + 1, groupedFilterDimOrder);
@@ -513,6 +515,16 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp,
   advanceOperandIndex(outputIndex, outputEnd, groupedOutputDimOrder);
   advanceOperandIndex(filterIndex, filterEnd, groupedFilterDimOrder);
   advanceOperandIndex(inputIndex, inputEnd, im2ColReassocIndices);
+
+  // Construct the full map from the parallel and reduction maps.
+  DenseMap<int64_t, AffineExpr> leadingGroupDimToIterationDim;
+  for (auto [key, value] : leadingGroupDimToParallelIterationDim)
+    leadingGroupDimToIterationDim[key] = rewriter.getAffineDimExpr(value);
+  for (auto [key, value] : leadingGroupDimToReductionIterationDim)
+    leadingGroupDimToIterationDim[key] =
+        rewriter.getAffineDimExpr(value + parallelIterationDim);
+
+  int64_t iterationDim = parallelIterationDim + reductionIterationDim;
 
   SmallVector<AffineExpr> inputExprs;
   SmallVector<AffineExpr> filterExprs;
@@ -540,6 +552,11 @@ rewriteInIm2Col(RewriterBase & rewriter, linalg::GenericOp genericOp,
     }
     DBGS() << "outputMap: " << newOutputMap << "\n";
   });
+
+  SmallVector<utils::IteratorType> iteratorTypes(parallelIterationDim,
+                                                 parallel);
+  for (int64_t i = 0; i < reductionIterationDim; i++)
+    iteratorTypes.push_back(reduction);
 
   auto newGenericOp = rewriter.create<linalg::GenericOp>(
       loc, reshapedOutputType,
