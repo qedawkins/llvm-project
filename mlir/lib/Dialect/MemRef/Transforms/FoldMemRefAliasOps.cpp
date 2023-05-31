@@ -295,6 +295,33 @@ public:
   }
 };
 
+class CastOfSubViewFolder : public OpRewritePattern<memref::CastOp> {
+public:
+  using OpRewritePattern<memref::CastOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(memref::CastOp castOp,
+                                PatternRewriter &rewriter) const override {
+    auto srcSubView = castOp.getSource().getDefiningOp<memref::SubViewOp>();
+    if (!srcSubView)
+      return failure();
+
+    // The condition needed for folding a cast into a subview is the same as the
+    // condition for folding into a consumer op. In particular, the cast does
+    // not introduce static information and both the source and destination
+    // memrefs are of equal rank.
+    if (!memref::CastOp::canFoldIntoConsumerOp(castOp))
+      return failure();
+
+    // Replace original op.
+    rewriter.replaceOpWithNewOp<memref::SubViewOp>(
+        castOp, cast<MemRefType>(castOp.getType()), srcSubView.getSource(),
+        srcSubView.getMixedOffsets(), srcSubView.getMixedSizes(),
+        srcSubView.getMixedStrides());
+
+    return success();
+  }
+};
+
 /// Folds nvgpu.device_async_copy subviews into the copy itself. This pattern
 /// is folds subview on src and dst memref of the copy.
 class NvgpuAsyncCopyOpSubViewOpFolder final
@@ -688,7 +715,7 @@ void memref::populateFoldMemRefAliasOpPatterns(RewritePatternSet &patterns) {
                LoadOpOfCollapseShapeOpFolder<affine::AffineLoadOp>,
                LoadOpOfCollapseShapeOpFolder<memref::LoadOp>,
                StoreOpOfCollapseShapeOpFolder<affine::AffineStoreOp>,
-               StoreOpOfCollapseShapeOpFolder<memref::StoreOp>,
+               StoreOpOfCollapseShapeOpFolder<memref::StoreOp>, CastOfSubViewFolder,
                SubViewOfSubViewFolder, NvgpuAsyncCopyOpSubViewOpFolder>(
       patterns.getContext());
 }
