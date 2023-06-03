@@ -3163,8 +3163,8 @@ void transform::ConvertConv2DToImg2ColOp::build(OpBuilder &builder, OperationSta
     result.addAttribute(ConvertConv2DToImg2ColOp::getNoOutputCollapseAttrName(result.name),
                         builder.getUnitAttr());
   }
-  result.addTypes(
-          SmallVector<Type>(2, pdl::OperationType::get(builder.getContext())));
+  auto resultType = transform::AnyOpType::get(builder.getContext());
+  result.addTypes(SmallVector<Type>(2, resultType));
 }
 
 DiagnosedSilenceableFailure transform::ConvertConv2DToImg2ColOp::applyToOne(
