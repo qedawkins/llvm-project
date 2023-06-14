@@ -631,6 +631,7 @@ def ParamConstantOp : Op<Transform_Dialect, "param.constant", [
 
 def PrintOp : TransformDialectOp<"print",
     [DeclareOpInterfaceMethods<TransformOpInterface>,
+     MatchOpInterface,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Dump each payload op";
   let description = [{
