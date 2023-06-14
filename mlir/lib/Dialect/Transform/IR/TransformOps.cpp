@@ -1214,6 +1214,49 @@ OpFoldResult transform::MergeHandlesOp::fold(FoldAdaptor adaptor) {
 }
 
 //===----------------------------------------------------------------------===//
+// MergeParamsOp
+//===----------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure
+transform::MergeParamsOp::apply(transform::TransformResults &results,
+                                 transform::TransformState &state) {
+  SmallVector<Attribute> attrs;
+  for (Value attribute : getParams())
+    llvm::append_range(attrs, state.getParams(attribute));
+  if (!getDeduplicate()) {
+    results.setParams(cast<OpResult>(getResult()), attrs);
+    return DiagnosedSilenceableFailure::success();
+  }
+
+  SetVector<Attribute> uniqued(attrs.begin(), attrs.end());
+  results.setParams(cast<OpResult>(getResult()), uniqued.getArrayRef());
+  return DiagnosedSilenceableFailure::success();
+}
+
+bool transform::MergeParamsOp::allowsRepeatedHandleOperands() {
+  // Params may be the same if deduplicating is enabled.
+  return getDeduplicate();
+}
+
+void transform::MergeParamsOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  onlyReadsHandle(getParams(), effects);
+  producesHandle(getResult(), effects);
+
+  // There are no effects on the Payload IR as this is only a handle
+  // manipulation.
+}
+
+OpFoldResult transform::MergeParamsOp::fold(FoldAdaptor adaptor) {
+  if (getDeduplicate() || getParams().size() != 1)
+    return {};
+
+  // If deduplication is not required and there is only one operand, it can be
+  // used directly instead of merging.
+  return getParams().front();
+}
+
+//===----------------------------------------------------------------------===//
 // NamedSequenceOp
 //===----------------------------------------------------------------------===//
 

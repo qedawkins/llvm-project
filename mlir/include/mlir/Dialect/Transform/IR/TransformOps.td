@@ -475,6 +475,30 @@ def MergeHandlesOp : TransformDialectOp<"merge_handles",
   let hasFolder = 1;
 }
 
+def MergeParamsOp : TransformDialectOp<"merge_params",
+    [DeclareOpInterfaceMethods<TransformOpInterface, ["allowsRepeatedHandleOperands"]>,
+     MatchOpInterface,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     SameOperandsAndResultType]> {
+  let summary = "Merges params into one pointing to the union of payload parameters";
+  let description = [{
+    Creates a new Transform IR handle value that points to the same Payload IR
+    parameters as the operand handles. The Payload IR operations are listed
+    in the same order as they are in the operand handles, grouped by operand
+    handle, e.g., all Payload IR params associated with the first handle
+    come first, then all Payload IR operations associated with the second handle
+    and so on. If `deduplicate` is set, do not add the given Payload IR
+    operation more than once to the final list regardless of it coming from the
+    same or different handles. Consumes the operands and produces a new handle.
+  }];
+
+  let arguments = (ins Variadic<TransformParamTypeInterface>:$params,
+                       UnitAttr:$deduplicate);
+  let results = (outs TransformParamTypeInterface:$result);
+  let assemblyFormat = "(`deduplicate` $deduplicate^)? $params attr-dict `:` type($result)";
+  let hasFolder = 1;
+}
+
 def NamedSequenceOp : TransformDialectOp<"named_sequence",
     [CallableOpInterface,
      FunctionOpInterface,
