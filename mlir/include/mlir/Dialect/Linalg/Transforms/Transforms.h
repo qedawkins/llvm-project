@@ -1364,6 +1364,25 @@ private:
   ControlFn controlFn;
 };
 
+/// Rewrite extract_slice(tensor.collapse/expand_shape(x)) into
+/// tensor.expand_shape(extract_slice(x)).
+struct ExtractSliceOfExpandTensorShapeSwapPattern
+    : public OpRewritePattern<tensor::ExtractSliceOp> {
+  /// A function to control pattern application and rewrite logic.
+  using ControlFn = std::function<bool(tensor::ExtractSliceOp)>;
+
+  ExtractSliceOfExpandTensorShapeSwapPattern(MLIRContext *context,
+                                             ControlFn controlFn = nullptr,
+                                             PatternBenefit benefit = 1)
+      : OpRewritePattern(context, benefit), controlFn(std::move(controlFn)) {}
+
+  LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override;
+
+private:
+  ControlFn controlFn;
+};
+
 //===----------------------------------------------------------------------===//
 // Populate functions.
 //===----------------------------------------------------------------------===//

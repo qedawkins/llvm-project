@@ -658,6 +658,77 @@ FailureOr<TilingResult> tensor::bubbleUpPadSlice(OpBuilder &b,
   return TilingResult{{newPadOp}, {castResult(newPadOp->getResult(0))}};
 }
 
+FailureOr<TilingResult> tensor::bubbleUpExpandShapeSlice(
+    OpBuilder &b, tensor::ExpandShapeOp expandShapeOp,
+    ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes) {
+  // Helper variables and function for accumulating the new offset and length
+  // values.
+  Location loc = expandShapeOp->getLoc();
+  AffineExpr dim0, sym0;
+  bindDims(b.getContext(), dim0);
+  bindSymbols(b.getContext(), sym0);
+  // Multiply two integers.
+  auto mul = [&](OpFoldResult v1, OpFoldResult v2) {
+    auto mulMap = AffineMap::get(1, 1, {dim0 * sym0});
+    return affine::makeComposedFoldedAffineApply(b, loc, mulMap, {v1, v2});
+  };
+
+  // Compute new offsets, lengths, low padding, high padding.
+  SmallVector<OpFoldResult> newOffsets, newLengths, newStrides;
+
+  int64_t rank = expandShapeOp.getType().getRank();
+  int64_t expandedDim = 0;
+  for (ReassociationIndices indices : expandShapeOp.getReassociationIndices()) {
+    auto offset = offsets[expandedDim];
+    auto length = sizes[expandedDim];
+
+    // Compute the offset and slice length of the collapsed dimension as
+    //   newOffset =
+    for (int e = indices.size() + expandedDim++; expandedDim < e;
+         ++expandedDim) {
+      // Bail on extracting from the middle of an expanded dim.
+      if (!isConstantIntValue(offsets[expandedDim], 0))
+        return failure();
+
+      auto expandedLength = sizes[expandedDim];
+      OpFoldResult srcSize =
+          tensor::getMixedSize(b, loc, expandShapeOp.getResult(), expandedDim);
+      std::optional<int64_t> constantLength =
+          getConstantIntValue(expandedLength);
+      std::optional<int64_t> constantSize = getConstantIntValue(srcSize);
+
+      // Bail when slicing an expanded dim other than the outer most.
+      // TODO: Check for the single dynamic dim per reassociation.
+      if (!constantLength || !constantSize || *constantLength != *constantSize)
+        return failure();
+
+      offset = mul(offset, expandedLength);
+      length = mul(length, expandedLength);
+    }
+
+    newOffsets.push_back(offset);
+    newLengths.push_back(length);
+
+    // Only unit stride supported.
+    newStrides.push_back(b.getIndexAttr(1));
+  }
+
+  // The shape of the result can be obtained from the sizes passed in.
+  SmallVector<Value> dynDims;
+  SmallVector<int64_t> shape;
+  dispatchIndexOpFoldResults(sizes, dynDims, shape);
+  RankedTensorType resultType = RankedTensorType::get(
+      shape, expandShapeOp.getResultType().getElementType());
+
+  // Create a new SliceOp and ExpandShapeOp.
+  Value newSliceOp = b.create<tensor::ExtractSliceOp>(
+      loc, expandShapeOp.getSrc(), newOffsets, newLengths, newStrides);
+  auto newExpandShapeOp = b.create<tensor::ExpandShapeOp>(
+      loc, resultType, newSliceOp, expandShapeOp.getReassociationIndices());
+
+  return TilingResult{{newExpandShapeOp}, {newExpandShapeOp.getResult()}};
+}
+
 void mlir::tensor::registerTilingInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, TensorDialect *dialect) {

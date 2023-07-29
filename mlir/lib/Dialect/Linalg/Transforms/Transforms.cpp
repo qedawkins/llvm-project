@@ -1036,6 +1036,30 @@ LogicalResult ExtractSliceOfPadTensorSwapPattern::matchAndRewrite(
   return success();
 }
 
+LogicalResult ExtractSliceOfExpandTensorShapeSwapPattern::matchAndRewrite(
+    tensor::ExtractSliceOp sliceOp, PatternRewriter &rewriter) const {
+  if (!sliceOp.hasUnitStride())
+    return failure();
+
+  auto expandShapeOp =
+      sliceOp.getSource().getDefiningOp<tensor::ExpandShapeOp>();
+  if (!expandShapeOp)
+    return failure();
+
+  if (controlFn && !controlFn(sliceOp))
+    return failure();
+
+  FailureOr<TilingResult> tilingResult = tensor::bubbleUpExpandShapeSlice(
+      rewriter, expandShapeOp, sliceOp.getMixedOffsets(),
+      sliceOp.getMixedSizes());
+  if (failed(tilingResult))
+    return failure();
+  // All shapes are static and the data source is actually used. Rewrite into
+  // pad(expand_shape(x)).
+  rewriter.replaceOp(sliceOp, tilingResult->tiledValues);
+  return success();
+}
+
 /// Returns a tensor.pad op if padding value is set. Otherwise, returns the
 /// source directly. The method assumes that the `packOp` has static shapes.
 static Value getPackOpSourceOrPaddedSource(OpBuilder &builder,

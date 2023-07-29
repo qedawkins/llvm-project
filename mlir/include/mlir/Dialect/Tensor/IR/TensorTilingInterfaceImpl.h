@@ -21,6 +21,7 @@ struct TilingResult;
 
 namespace tensor {
 
+class ExpandShapeOp;
 class PadOp;
 
 /// Bubbles up a slice of this pad by taking the slice first and then performing
@@ -46,6 +47,26 @@ FailureOr<TilingResult> bubbleUpPadSlice(OpBuilder &b, tensor::PadOp padOp,
                                          ArrayRef<OpFoldResult> offsets,
                                          ArrayRef<OpFoldResult> sizes,
                                          bool generateZeroSliceGuard = true);
+
+/// Bubbles up a slice of this expand_shape by taking the slice first and then
+/// performing the reshape. `offsets` and `strides` specifies each dimension's
+/// start offset and size for the slice. The slice has unit strides along all
+/// dimensions. The reshape cannot reassociate a sliced dimension.
+///
+/// Specifically, this function converts:
+/// ```
+/// %0 = tensor.expand_shape %source [...]
+/// %1 = <extract-slice> %0 offsets=[...], sizes[...]
+/// ```
+/// into
+/// ```
+/// %0 = tensor.extract_slice %source ...
+/// %1 = tensor.expand_shape %0 [...]
+/// ```
+FailureOr<TilingResult>
+bubbleUpExpandShapeSlice(OpBuilder &b, tensor::ExpandShapeOp expandShapeOp,
+                         ArrayRef<OpFoldResult> offsets,
+                         ArrayRef<OpFoldResult> sizes);
 
 /// Registers external models for Tiling interface for tensor ops.
 /// Currently, it registers:
