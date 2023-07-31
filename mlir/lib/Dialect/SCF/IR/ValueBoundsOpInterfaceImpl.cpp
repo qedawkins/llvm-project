@@ -114,6 +114,37 @@ struct ForOpInterface
   }
 };
 
+struct ForallOpInterface
+    : public ValueBoundsOpInterface::ExternalModel<ForallOpInterface,
+                                                   ForallOp> {
+
+  void populateBoundsForIndexValue(Operation *op, Value value,
+                                   ValueBoundsConstraintSet &cstr) const {
+    auto forallOp = cast<ForallOp>(op);
+
+    OpBuilder b(op);
+    for (auto [indVar, ub, lb] :
+         llvm::zip_equal(forallOp.getInductionVars(), forallOp.getUpperBound(b),
+                         forallOp.getLowerBound(b))) {
+      if (value == indVar) {
+        // TODO: Take into account step size.
+        cstr.bound(value) >= lb;
+        cstr.bound(value) < ub;
+        return;
+      }
+    }
+
+    // TODO: Handle shared_outs and OpResults.
+    return;
+  }
+
+  void populateBoundsForShapedValueDim(Operation *op, Value value, int64_t dim,
+                                       ValueBoundsConstraintSet &cstr) const {
+    // TODO: Handle shared_outs and OpResults.
+    return;
+  }
+};
+
 } // namespace
 } // namespace scf
 } // namespace mlir
@@ -122,5 +153,6 @@ void mlir::scf::registerValueBoundsOpInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, scf::SCFDialect *dialect) {
     scf::ForOp::attachInterface<scf::ForOpInterface>(*ctx);
+    scf::ForallOp::attachInterface<scf::ForallOpInterface>(*ctx);
   });
 }
