@@ -43,8 +43,8 @@ FailureOr<SplitReductionResult> mlir::linalg::splitReduction(
   SmallVector<unsigned> dims;
   op.getReductionDims(dims);
 
-  if (dims.size() != 1)
-    return b.notifyMatchFailure(op, "needs a single reduction dimension");
+  if (dims.size() < 1)
+    return b.notifyMatchFailure(op, "needs at least one reduction dimension");
   unsigned reductionDim = dims[0];
   if (control.innerParallel) {
     insertSplitDimension = reductionDim + 1;
