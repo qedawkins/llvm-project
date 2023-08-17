@@ -342,7 +342,11 @@ struct UnrollContractionPattern
     auto targetShape = getTargetShape(options, contractOp);
     if (!targetShape)
       return failure();
-    auto dstVecType = cast<VectorType>(contractOp.getResultType());
+    auto dstType = contractOp.getResultType();
+    VectorType dstVecType;
+    bool isScalarRes = !isa<VectorType>(dstType);
+    if (!isScalarRes)
+      dstVecType = cast<VectorType>(dstType);
     SmallVector<int64_t> originalSize = *contractOp.getShapeForUnroll();
 
     Location loc = contractOp.getLoc();
@@ -391,14 +395,20 @@ struct UnrollContractionPattern
       // If a version of the accumulator has already been computed, use it
       // otherwise extract the first version from the original operand.
       auto accIt = accCache.find(accOffets);
-      if (accIt != accCache.end())
+      if (accIt != accCache.end()) {
         slicesOperands[2] = accIt->second;
-      else
+      } else if (isScalarRes) {
+        slicesOperands[2] = contractOp.getAcc();
+      } else {
         extractOperand(2, contractOp.getAcc(), accPermutationMap, accOffets);
+      }
 
-      SmallVector<int64_t> dstShape =
-          applyPermutationMap(dstAffineMap, ArrayRef<int64_t>(*targetShape));
-      auto targetType = VectorType::get(dstShape, dstVecType.getElementType());
+      Type targetType = dstType;
+      if (!isScalarRes) {
+        SmallVector<int64_t> dstShape =
+            applyPermutationMap(dstAffineMap, ArrayRef<int64_t>(*targetShape));
+        targetType = VectorType::get(dstShape, dstVecType.getElementType());
+      }
       Operation *newOp = cloneOpWithOperandsAndTypes(
           rewriter, loc, contractOp, slicesOperands, targetType);
 
@@ -409,12 +419,17 @@ struct UnrollContractionPattern
       accCache[dstOffets] = newOp->getResult(0);
     }
     // Assemble back the accumulator into a single vector.
-    Value result = rewriter.create<arith::ConstantOp>(
-        loc, dstVecType, rewriter.getZeroAttr(dstVecType));
-    for (const auto &it : accCache) {
-      SmallVector<int64_t> dstStrides(it.first.size(), 1);
-      result = rewriter.create<vector::InsertStridedSliceOp>(
-          loc, it.second, result, it.first, dstStrides);
+    Value result;
+    if (isScalarRes) {
+      result = accCache.find({})->second;
+    } else {
+      result = rewriter.create<arith::ConstantOp>(
+          loc, dstType, rewriter.getZeroAttr(dstType));
+      for (const auto &it : accCache) {
+        SmallVector<int64_t> dstStrides(it.first.size(), 1);
+        result = rewriter.create<vector::InsertStridedSliceOp>(
+            loc, it.second, result, it.first, dstStrides);
+      }
     }
     rewriter.replaceOp(contractOp, result);
     return success();
