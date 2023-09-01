@@ -3143,7 +3143,7 @@ transform::VectorizeOp::applyToOne(transform::TransformRewriter &rewriter,
   if (!getDisableMultiReductionToContractPatterns())
     vector::populateVectorReductionToContractPatterns(patterns);
 
-  vector::populateSinkVectorBroadcastPatterns(patterns);
+  //vector::populateSinkVectorBroadcastPatterns(patterns);
 
   patterns.add<linalg::LinalgCopyVTRForwardingPattern,
                linalg::LinalgCopyVTWForwardingPattern>(ctx,

@@ -1550,6 +1550,8 @@ struct WarpOpScfForOp : public OpRewritePattern<WarpExecuteOnLane0Op> {
         operand.set(innerWarp.getBodyRegion().getArgument(it->second));
       }
     });
+    // Hoist out now uniform scalar code previously used in index arithmetic for the loop.
+    moveScalarUniformCode(innerWarp);
     return success();
   }
 

@@ -151,18 +151,25 @@ AffineMap mlir::vector::getTransferMinorIdentityMap(ShapedType shapedType,
 
 bool mlir::vector::checkSameValueRAW(vector::TransferWriteOp defWrite,
                                      vector::TransferReadOp read) {
+  VectorType writeType = defWrite.getVectorType();
+  VectorType readType = read.getVectorType();
   return !defWrite.hasOutOfBoundsDim() && !defWrite.getMask() &&
          !read.getMask() && defWrite.getIndices() == read.getIndices() &&
-         defWrite.getVectorType() == read.getVectorType() &&
-         defWrite.getPermutationMap() == read.getPermutationMap();
+         ((writeType.getNumElements() == 1 && readType.getNumElements() == 1) ||
+         (writeType == readType &&
+         defWrite.getPermutationMap() == read.getPermutationMap()));
 }
 
 bool mlir::vector::checkSameValueWAW(vector::TransferWriteOp write,
                                      vector::TransferWriteOp priorWrite) {
+  VectorType writeType = priorWrite.getVectorType();
+  VectorType readType = write.getVectorType();
   return priorWrite.getIndices() == write.getIndices() &&
          priorWrite.getMask() == write.getMask() &&
-         priorWrite.getVectorType() == write.getVectorType() &&
          priorWrite.getPermutationMap() == write.getPermutationMap();
+         ((writeType.getNumElements() == 1 && readType.getNumElements() == 1) ||
+         (writeType == readType &&
+         priorWrite.getPermutationMap() == write.getPermutationMap()));
 }
 
 bool mlir::vector::isDisjointTransferIndices(

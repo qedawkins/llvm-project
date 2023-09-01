@@ -250,7 +250,16 @@ void TransferOptimization::storeToLoadForwarding(vector::TransferReadOp read) {
 
   LLVM_DEBUG(DBGS() << "Forward value from " << *lastwrite.getOperation()
                     << " to: " << *read.getOperation() << "\n");
-  read.replaceAllUsesWith(lastwrite.getVector());
+  VectorType writeType = lastwrite.getVectorType();
+  VectorType readType = read.getVectorType();
+  Value cast = lastwrite.getVector();
+  if (readType != writeType) {
+    OpBuilder b(readType.getContext());
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPoint(read);
+    cast = b.create<vector::ShapeCastOp>(read.getLoc(), readType, cast);
+  }
+  read.replaceAllUsesWith(cast);
   opToErase.push_back(read.getOperation());
 }
 
