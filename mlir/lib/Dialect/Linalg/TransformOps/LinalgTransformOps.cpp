@@ -2255,10 +2255,15 @@ DiagnosedSilenceableFailure transform::SplitReductionOp::applyToOne(
     transform::TransformRewriter &rewriter, LinalgOp target,
     transform::ApplyToEachResultList &results,
     transform::TransformState &state) {
+  ArrayRef<int64_t> splitFactor = getSplitFactor();
+  ArrayRef<bool> innerParallel = getInnerParallel();
+  SmallVector<unsigned> insertDims;
+  for (int64_t i : getInsertSplitDimension())
+    insertDims.push_back(i);
   ControlSplitReductionFn splitFn = [&](LinalgOp) {
-    return linalg::SplitReductionOptions{int64_t(getSplitFactor()),
-                                         unsigned(getInsertSplitDimension()),
-                                         bool(getInnerParallel())};
+    return linalg::SplitReductionOptions{SmallVector<int64_t>(splitFactor),
+                                         insertDims,
+                                         SmallVector<bool>(innerParallel)};
   };
   rewriter.setInsertionPoint(target);
   FailureOr<SplitReductionResult> splitResult =

@@ -1472,9 +1472,9 @@ def SplitReductionOp : Op<Transform_Dialect, "structured.split_reduction",
   }];
 
   let arguments = (ins TransformHandleTypeInterface:$target,
-                   DefaultValuedAttr<I64Attr, "{}">:$split_factor,
-                   DefaultValuedAttr<I64Attr, "{}">:$insert_split_dimension,
-                   UnitAttr:$inner_parallel,
+                   DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$split_factor,
+                   DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$insert_split_dimension,
+                   DefaultValuedAttr<DenseBoolArrayAttr, "{}">:$inner_parallel,
                    UnitAttr:$use_scaling_algorithm,
                    UnitAttr:$use_alloc);
   let results = (outs TransformHandleTypeInterface:$init_or_alloc_op,
@@ -1482,9 +1482,14 @@ def SplitReductionOp : Op<Transform_Dialect, "structured.split_reduction",
                       TransformHandleTypeInterface:$split_linalg_op,
                       TransformHandleTypeInterface:$combining_linalg_op);
 
-  let assemblyFormat = 
-      "$target attr-dict `:`"
-      "functional-type(operands, results)";
+  let assemblyFormat = [{
+      $target
+      `split_factor` `=` $split_factor
+      `insert_split_dimension` `=` $insert_split_dimension
+      `inner_parallel` `=` $inner_parallel
+      attr-dict `:`
+      functional-type(operands, results)
+  }];
 
   let builders = [
     OpBuilder<(ins "Value":$target,

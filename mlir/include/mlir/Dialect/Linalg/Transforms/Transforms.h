@@ -394,14 +394,14 @@ struct LinalgPromotionOptions {
 
 /// Split Reduction options.
 struct SplitReductionOptions {
-  // Ratio used to split the reduction dimension.  If the ratio is <= 1,
+  // Ratios used to split the reduction dimensions.  If the ratio is <= 1,
   // nothing will be done.
-  int64_t ratio = 0;
+  SmallVector<int64_t> ratio = {};
   // Index where the extra dimension is added to the intermediate tensor
   // shape.
-  unsigned index = 0;
+  SmallVector<unsigned> index = {};
   // If the inner dimension after splitting is parallel or reduction.
-  bool innerParallel = false;
+  SmallVector<bool> innerParallel = {};
 };
 
 /// Function signature to control reduction splitting. This returns
