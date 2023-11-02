@@ -1567,6 +1567,56 @@ private:
   DistributionMapFn distributionMapFn;
 };
 
+/// A pattern that extracts scf.forall ops from a WarpExecuteOnLane0Op.
+struct WarpOpForAll : public OpRewritePattern<WarpExecuteOnLane0Op> {
+  WarpOpForAll(MLIRContext *context, PatternBenefit benefit = 1)
+      : OpRewritePattern<WarpExecuteOnLane0Op>(context, benefit) {}
+
+  LogicalResult matchAndRewrite(WarpExecuteOnLane0Op warpOp,
+                                PatternRewriter &rewriter) const override {
+    auto yield = cast<vector::YieldOp>(
+        warpOp.getBodyRegion().getBlocks().begin()->getTerminator());
+    // Only pick up forallOp if it is the last op in the region.
+    Operation *lastNode = yield->getPrevNode();
+    auto forallOp = dyn_cast_or_null<scf::ForallOp>(lastNode);
+    if (!forallOp)
+      return failure();
+    // Collect Values that come from the warp op but are outside the forallOp.
+    // Those Value needs to be returned by the original warpOp and passed to the
+    // new op.
+    llvm::SmallSetVector<Value, 32> escapingValues;
+    SmallVector<Type> distTypes;
+    mlir::visitUsedValuesDefinedAbove(
+        forallOp.getBodyRegion(), [&](OpOperand *operand) {
+          Operation *parent = operand->get().getParentRegion()->getParentOp();
+          if (warpOp->isAncestor(parent)) {
+            if (!escapingValues.insert(operand->get()))
+              return;
+            // Everything inside the forall region is treated as already
+            // distributed, thus we just push back the operand types.
+            distTypes.push_back(operand->get().getType());
+          }
+        });
+
+    SmallVector<size_t> newRetIndices;
+    ArrayRef<Value> escapingArray = escapingValues.getArrayRef();
+    WarpExecuteOnLane0Op newWarpOp = moveRegionToNewWarpOpAndAppendReturns(
+        rewriter, warpOp, escapingArray, distTypes, newRetIndices);
+    yield = cast<vector::YieldOp>(
+        newWarpOp.getBodyRegion().getBlocks().begin()->getTerminator());
+
+    OpBuilder::InsertionGuard g(rewriter);
+    rewriter.setInsertionPointAfter(newWarpOp);
+
+    IRMapping mapping;
+    for (auto [idx, resultIdx] : llvm::enumerate(newRetIndices)) {
+      mapping.map(escapingArray[idx], newWarpOp.getResult(resultIdx));
+    }
+    (void)rewriter.clone(*forallOp, mapping);
+    return success();
+  }
+};
+
 /// A pattern that extracts vector.reduction ops from a WarpExecuteOnLane0Op.
 /// The vector is reduced in parallel. Currently limited to vector size matching
 /// the warpOp size. E.g.:
@@ -1669,7 +1719,7 @@ void mlir::vector::populatePropagateWarpVectorDistributionPatterns(
     RewritePatternSet &patterns, const DistributionMapFn &distributionMapFn,
     const WarpShuffleFromIdxFn &warpShuffleFromIdxFn, PatternBenefit benefit) {
   patterns.add<WarpOpElementwise, WarpOpTransferRead, WarpOpDeadResult,
-               WarpOpBroadcast, WarpOpShapeCast, WarpOpExtract,
+               WarpOpBroadcast, WarpOpShapeCast, WarpOpExtract, WarpOpForAll,
                WarpOpForwardOperand, WarpOpConstant, WarpOpInsertElement,
                WarpOpInsert>(patterns.getContext(), benefit);
   patterns.add<WarpOpExtractElement>(patterns.getContext(),
