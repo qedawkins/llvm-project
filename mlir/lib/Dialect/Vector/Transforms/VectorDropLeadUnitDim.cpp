@@ -256,9 +256,6 @@ struct CastAwayTransferWriteLeadingOneDim
     if (write.getTransferRank() == 0)
       return failure();
 
-    if (write.getMask())
-      return failure();
-
     auto shapedType = dyn_cast<ShapedType>(write.getSource().getType());
     if (shapedType.getElementType() != write.getVectorType().getElementType())
       return failure();
@@ -283,10 +280,21 @@ struct CastAwayTransferWriteLeadingOneDim
 
     auto newVector = rewriter.create<vector::ExtractOp>(
         write.getLoc(), write.getVector(), splatZero(dropDim));
+
+    if (write.getMask()) {
+      // The mask shape must always match the shape of the written vector, so we
+      // can safely use the same extraction indices.
+      auto newMask = rewriter.create<vector::ExtractOp>(
+          write.getLoc(), write.getMask(), splatZero(dropDim));
+      rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(
+          write, newVector, write.getSource(), write.getIndices(),
+          AffineMapAttr::get(newMap), newMask, inBoundsAttr);
+      return success();
+    }
+
     rewriter.replaceOpWithNewOp<vector::TransferWriteOp>(
         write, newVector, write.getSource(), write.getIndices(),
         AffineMapAttr::get(newMap), inBoundsAttr);
-
     return success();
   }
 };
