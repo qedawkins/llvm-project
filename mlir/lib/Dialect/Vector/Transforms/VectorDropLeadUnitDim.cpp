@@ -208,9 +208,6 @@ struct CastAwayTransferReadLeadingOneDim
     if (read.getTransferRank() == 0)
       return failure();
 
-    if (read.getMask())
-      return failure();
-
     auto shapedType = cast<ShapedType>(read.getSource().getType());
     if (shapedType.getElementType() != read.getVectorType().getElementType())
       return failure();
@@ -233,10 +230,18 @@ struct CastAwayTransferReadLeadingOneDim
       inBoundsAttr = rewriter.getArrayAttr(
           read.getInBoundsAttr().getValue().take_back(newType.getRank()));
 
+    Value mask = Value();
+    if (read.getMask()) {
+      // The mask shape must always match the shape of the written vector, so we
+      // can safely use the same extraction indices.
+      int64_t dropDim = oldType.getRank() - newType.getRank();
+      mask = rewriter.create<vector::ExtractOp>(read.getLoc(), read.getMask(),
+                                                splatZero(dropDim));
+    }
+
     auto newRead = rewriter.create<vector::TransferReadOp>(
         read.getLoc(), newType, read.getSource(), read.getIndices(),
-        AffineMapAttr::get(newMap), read.getPadding(), /*mask=*/Value(),
-        inBoundsAttr);
+        AffineMapAttr::get(newMap), read.getPadding(), mask, inBoundsAttr);
     rewriter.replaceOpWithNewOp<vector::BroadcastOp>(read, oldType, newRead);
 
     return success();
