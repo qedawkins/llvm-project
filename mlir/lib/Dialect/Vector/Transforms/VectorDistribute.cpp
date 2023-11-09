@@ -474,10 +474,10 @@ static VectorType getDistributedType(VectorType originalType, AffineMap map,
 ///   vector.yield %v : vector<32xf32>
 /// }
 /// vector.transfer_write %v, %A[%id] : vector<1xf32>, memref<128xf32>
-struct WarpOpTransferWrite : public OpRewritePattern<vector::TransferWriteOp> {
+struct WarpOpTransferWrite : public OpRewritePattern<WarpExecuteOnLane0Op> {
   WarpOpTransferWrite(MLIRContext *ctx, DistributionMapFn fn,
                       PatternBenefit b = 1)
-      : OpRewritePattern<vector::TransferWriteOp>(ctx, b),
+      : OpRewritePattern<WarpExecuteOnLane0Op>(ctx, b),
         distributionMapFn(std::move(fn)) {}
 
   /// Distribute the TransferWriteOp. Only 1D distributions and vector dims that
@@ -584,17 +584,14 @@ struct WarpOpTransferWrite : public OpRewritePattern<vector::TransferWriteOp> {
     return success();
   }
 
-  LogicalResult matchAndRewrite(vector::TransferWriteOp writeOp,
+  LogicalResult matchAndRewrite(WarpExecuteOnLane0Op warpOp,
                                 PatternRewriter &rewriter) const override {
-    auto warpOp = dyn_cast<WarpExecuteOnLane0Op>(writeOp->getParentOp());
-    if (!warpOp)
+    auto yield = cast<vector::YieldOp>(
+      warpOp.getBodyRegion().getBlocks().begin()->getTerminator());
+    Operation *lastNode = yield->getPrevNode();
+    auto writeOp = dyn_cast_or_null<vector::TransferWriteOp>(lastNode);
+    if (!writeOp)
       return failure();
-
-    // There must be no op with a side effect after writeOp.
-    Operation *nextOp = writeOp.getOperation();
-    while ((nextOp = nextOp->getNextNode()))
-      if (!isMemoryEffectFree(nextOp))
-        return failure();
 
     Value maybeMask = writeOp.getMask();
     if (!llvm::all_of(writeOp->getOperands(), [&](Value value) {
@@ -1872,7 +1869,9 @@ void mlir::vector::populateDistributeTransferWriteOpPatterns(
 
 void mlir::vector::populatePropagateWarpVectorDistributionPatterns(
     RewritePatternSet &patterns, const DistributionMapFn &distributionMapFn,
-    const WarpShuffleFromIdxFn &warpShuffleFromIdxFn, PatternBenefit benefit) {
+    const WarpShuffleFromIdxFn &warpShuffleFromIdxFn, PatternBenefit benefit,
+    PatternBenefit readBenefit) {
+  patterns.add<WarpOpTransferRead>(patterns.getContext(), readBenefit);
   patterns.add<WarpOpElementwise, WarpOpTransferRead, WarpOpDeadResult,
                WarpOpBroadcast, WarpOpShapeCast, WarpOpExtract, WarpOpForAll,
                WarpOpForwardOperand, WarpOpConstant, WarpOpInsertElement,
