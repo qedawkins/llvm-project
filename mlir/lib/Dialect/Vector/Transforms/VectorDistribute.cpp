@@ -1663,16 +1663,27 @@ struct WarpOpScfForOp : public OpRewritePattern<WarpExecuteOnLane0Op> {
         newWarpOp.getBodyRegion().getBlocks().begin()->getTerminator());
 
     SmallVector<Value> newOperands;
-    SmallVector<unsigned> resultIdx;
+    SmallVector<std::optional<unsigned>> resultIdx;
     // Collect all the outputs coming from the forOp.
+    llvm::SmallDenseMap<Value, int64_t> yieldArgMapping;
     for (OpOperand &yieldOperand : yield->getOpOperands()) {
       if (yieldOperand.get().getDefiningOp() != forOp.getOperation())
         continue;
-      auto forResult = cast<OpResult>(yieldOperand.get());
-      newOperands.push_back(
-          newWarpOp.getResult(yieldOperand.getOperandNumber()));
-      yieldOperand.set(forOp.getInitArgs()[forResult.getResultNumber()]);
-      resultIdx.push_back(yieldOperand.getOperandNumber());
+      if (yieldArgMapping.contains(yieldOperand.get()))
+        return failure();
+      yieldArgMapping[yieldOperand.get()] = yieldOperand.getOperandNumber();
+    }
+    for (OpResult forResult : forOp.getResults()) {
+      if (!yieldArgMapping.contains(forResult)) {
+        newOperands.push_back(forOp.getInitArgs()[forResult.getResultNumber()]);
+        resultIdx.push_back(std::nullopt);
+        continue;
+      }
+      int64_t yieldNumber = yieldArgMapping[forResult];
+      newOperands.push_back(newWarpOp.getResult(yieldNumber));
+      yield->getOpOperand(yieldNumber)
+          .set(forOp.getInitArgs()[forResult.getResultNumber()]);
+      resultIdx.push_back(yieldNumber);
     }
 
     OpBuilder::InsertionGuard g(rewriter);
@@ -1718,9 +1729,12 @@ struct WarpOpScfForOp : public OpRewritePattern<WarpExecuteOnLane0Op> {
     rewriter.eraseOp(forOp);
     // Replace the warpOp result coming from the original ForOp.
     for (const auto &res : llvm::enumerate(resultIdx)) {
-      rewriter.replaceAllUsesWith(newWarpOp.getResult(res.value()),
+      if (!res.value())
+        continue;
+      unsigned resIdx = *res.value();
+      rewriter.replaceAllUsesWith(newWarpOp.getResult(resIdx),
                                   newForOp.getResult(res.index()));
-      newForOp->setOperand(res.index() + 3, newWarpOp.getResult(res.value()));
+      newForOp->setOperand(res.index() + 3, newWarpOp.getResult(resIdx));
     }
     newForOp.walk([&](Operation *op) {
       for (OpOperand &operand : op->getOpOperands()) {
