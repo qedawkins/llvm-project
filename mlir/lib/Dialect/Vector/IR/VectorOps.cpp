@@ -4529,11 +4529,48 @@ public:
   }
 };
 
+/// Rewrite 0-D tensor::ExtractOp(vector::TransferWriteOp) to
+/// vector::ExtractElementOp.
+///
+/// For example:
+/// ```mlir
+///   %0 = vector.transfer_write %vec, %init_tensor[]
+///        : vector<f32>, tensor<f32>
+///   %1 = tensor.extract %0[] : tensor<f32>
+/// ```
+/// folds to
+/// ```mlir
+///   %1 = vector.extract_element %vec : vector<f32>
+/// ```
+struct FoldExtractOfTransferWrite
+    : public OpRewritePattern<tensor::ExtractOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::ExtractOp extractOp,
+                                PatternRewriter &rewriter) const override {
+    auto tensor = extractOp.getTensor();
+    auto tensorType = cast<RankedTensorType>(tensor.getType());
+    if (tensorType.getRank() != 0)
+      return failure();
+    auto writeOp = tensor.getDefiningOp<vector::TransferWriteOp>();
+    if (!writeOp)
+      return failure();
+    if (writeOp.getMask())
+      return failure();
+    if (writeOp.getVectorType().getRank() != 0)
+      return failure();
+
+    rewriter.replaceOpWithNewOp<vector::ExtractElementOp>(extractOp, writeOp.getVector());
+    return success();
+  }
+};
+
 } // namespace
 
 void TransferWriteOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                   MLIRContext *context) {
-  results.add<FoldWaw, SwapExtractSliceOfTransferWrite>(context);
+  results.add<FoldExtractOfTransferWrite, FoldWaw, SwapExtractSliceOfTransferWrite>(context);
 }
 
 //===----------------------------------------------------------------------===//
