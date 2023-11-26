@@ -819,6 +819,17 @@ struct WarpOpTransferRead : public OpRewritePattern<WarpExecuteOnLane0Op> {
 
     SmallVector<Value, 4> indices(read.getIndices().begin(),
                                   read.getIndices().end());
+
+    for (auto &index : indices) {
+      auto arg = dyn_cast<BlockArgument>(index);
+      if (!arg || arg.getOwner()->getParentOp() != warpOp.getOperation())
+        continue;
+      Value warpOperand = warpOp.getArgs()[arg.getArgNumber()];
+      if (index.getType() != warpOperand.getType())
+        continue;
+      index = warpOperand;
+    }
+
     auto sequentialType = cast<VectorType>(read.getResult().getType());
     auto distributedType = cast<VectorType>(distributedVal.getType());
     AffineMap map = calculateImplicitMap(sequentialType, distributedType);
