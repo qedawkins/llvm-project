@@ -604,7 +604,7 @@ ConcatOp::reifyResultShapes(OpBuilder &builder,
   // Take the sum of the input sizes along the concatenated dim.
   AffineExpr sum = builder.getAffineDimExpr(0);
   SmallVector<OpFoldResult> sizes = {
-      builder.create<tensor::DimOp>(init.getLoc(), init, 0).getResult()};
+      builder.createOrFold<tensor::DimOp>(init.getLoc(), init, 0)};
   for (auto [idx, input] : llvm::enumerate(inputs.drop_front())) {
     sum = sum + builder.getAffineDimExpr(idx + 1);
     sizes.push_back(
