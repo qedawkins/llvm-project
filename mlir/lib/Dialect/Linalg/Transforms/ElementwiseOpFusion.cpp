@@ -17,6 +17,8 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/SparseTensor/IR/SparseTensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Matchers.h"
@@ -435,8 +437,10 @@ public:
       // Do not fuse a sparse-in/dense-out operation, as the
       // result is too often not sparsifiable anymore.
       if (sparse_tensor::hasAnySparseOperand(producer) &&
-          !sparse_tensor::hasAnySparseResult(producer))
-        return failure();
+          !sparse_tensor::hasAnySparseResult(producer)) {
+        return rewriter.notifyMatchFailure(genericOp,
+                                           "Skipping fusion for sparse-in dense-out producer");
+      }
 
       // Find the producer of the operand.
       FailureOr<ElementwiseOpFusionResult> fusionResult =
@@ -454,7 +458,8 @@ public:
       rewriter.eraseOp(genericOp);
       return success();
     }
-    return failure();
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "failed to find operand for elementwise op fusion");
   }
 
 private:
@@ -527,6 +532,8 @@ static bool isFusableWithReshapeByDimExpansion(GenericOp genericOp,
   //   permutations.
   // - The fused tensor is not a scalar.
   // - All the loops are parallel loops.
+  SmallVector<utils::IteratorType> iteratorTypes = genericOp.getIteratorTypesArray();
+  AffineMap operandMap = genericOp.getMatchingIndexingMap(fusableOpOperand);
   return genericOp.hasPureTensorSemantics() &&
          llvm::all_of(genericOp.getIndexingMaps().getValue(),
                       [](Attribute attr) {
@@ -534,9 +541,11 @@ static bool isFusableWithReshapeByDimExpansion(GenericOp genericOp,
                             .getValue()
                             .isProjectedPermutation();
                       }) &&
-         genericOp.getMatchingIndexingMap(fusableOpOperand).getNumResults() >
+         operandMap.getNumResults() >
              0 &&
-         llvm::all_of(genericOp.getIteratorTypesArray(), isParallelIterator);
+         llvm::all_of(operandMap.getResults(), [&](AffineExpr expr) {
+          return isParallelIterator(iteratorTypes[cast<AffineDimExpr>(expr).getPosition()]);
+                                               });
 }
 
 namespace {
@@ -848,6 +857,11 @@ fuseWithReshapeByExpansion(GenericOp genericOp, Operation *reshapeOp,
   // The iterator types of the expanded op are all parallel.
   SmallVector<utils::IteratorType> iteratorTypes(
       expansionInfo.getExpandedOpNumDims(), utils::IteratorType::parallel);
+  for (auto [i, type] : llvm::enumerate(genericOp.getIteratorTypesArray())) {
+    ReassociationIndicesRef group = expansionInfo.getExpandedDims(i);
+    for (auto i : group)
+      iteratorTypes[i] = type;
+  }
 
   TypeRange resultTypes = ValueRange(outputs).getTypes();
   auto fusedOp =
@@ -1661,7 +1675,8 @@ public:
       rewriter.replaceOp(genericOp, collapseResult->results);
       return success();
     }
-    return failure();
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "failed to find operand for fusion by collapsing");
   }
 
 private:
@@ -1682,8 +1697,10 @@ public:
                                 PatternRewriter &rewriter) const override {
     SmallVector<ReassociationIndices> collapsableIterationDims =
         controlCollapseDimension(op);
-    if (collapsableIterationDims.empty())
-      return failure();
+    if (collapsableIterationDims.empty()) {
+      return rewriter.notifyMatchFailure(op,
+                                         "no collapsible iteration dims");
+    }
 
     // Check if the specified list of dimensions to collapse is a valid list.
     if (!areDimSequencesPreserved(op.getIndexingMapsArray(),
