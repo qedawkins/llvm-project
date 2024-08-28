@@ -115,11 +115,15 @@ LogicalResult FooAnalysis::initialize(Operation *top) {
 }
 
 LogicalResult FooAnalysis::visit(ProgramPoint point) {
-  if (auto *op = llvm::dyn_cast_if_present<Operation *>(point))
+  if (auto *op = llvm::dyn_cast_if_present<Operation *>(point)) {
     visitOperation(op);
-  else
-    visitBlock(point.get<Block *>());
-  return success();
+    return success();
+  }
+  if (auto *block = llvm::dyn_cast_if_present<Block *>(point)) {
+    visitBlock(block);
+    return success();
+  }
+  return emitError(point.getLoc(), "unknown point kind");
 }
 
 void FooAnalysis::visitBlock(Block *block) {

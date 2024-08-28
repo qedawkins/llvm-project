@@ -40,7 +40,7 @@ static void printAnalysisResults(DataFlowSolver &solver, Operation *op,
           pred->printAsOperand(os);
           os << " = ";
           auto *live = solver.lookupState<Executable>(
-              solver.getLatticeAnchor<CFGEdge>(pred, &block));
+              solver.getProgramPoint<CFGEdge>(pred, &block));
           if (live)
             os << *live;
           else

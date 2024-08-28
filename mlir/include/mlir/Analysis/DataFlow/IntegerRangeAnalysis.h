@@ -50,7 +50,7 @@ public:
   /// At an entry point, we cannot reason about interger value ranges.
   void setToEntryState(IntegerValueRangeLattice *lattice) override {
     propagateIfChanged(lattice, lattice->join(IntegerValueRange::getMaxRange(
-                                    lattice->getAnchor())));
+                                    lattice->getPoint())));
   }
 
   /// Visit an operation. Invoke the transfer function on each operation that
