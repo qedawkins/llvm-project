@@ -25,7 +25,6 @@ def AMDGPU_Dialect : Dialect {
 
 
   let dependentDialects = [
-    "ROCDL::ROCDLDialect",
     "arith::ArithDialect",
     "gpu::GPUDialect"
   ];

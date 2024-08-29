@@ -9,9 +9,7 @@
 #ifndef MLIR_CONVERSION_ARITHTOAMDGPU_ARITHTOAMDGPU_H
 #define MLIR_CONVERSION_ARITHTOAMDGPU_ARITHTOAMDGPU_H
 
-#include "mlir/Dialect/AMDGPU/Utils/Chipset.h"
 #include <memory>
-#include <string>
 
 namespace mlir {
 
@@ -28,10 +26,7 @@ namespace arith {
 /// to the largest value of that type instead of being rewritten to Inf (aka
 /// NaN).
 void populateArithToAMDGPUConversionPatterns(RewritePatternSet &patterns,
-                                             bool convertFP8Arithmetic,
-                                             bool saturateFP8Truncf,
-                                             bool allowPackedF16Rtz,
-                                             amdgpu::Chipset chipset);
+                                             bool saturateFP8TruncF);
 } // namespace arith
 } // namespace mlir
 
