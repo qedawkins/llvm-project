@@ -1672,6 +1672,11 @@ ExpandShapeOp::inferOutputShape(OpBuilder &b, Location loc,
   return *outputShape;
 }
 
+SmallVector<OpFoldResult> ExpandShapeOp::getMixedOutputShape() {
+  Builder b(getContext());
+  return getMixedValues(getStaticOutputShape(), getOutputShape(), b);
+}
+
 void ExpandShapeOp::build(OpBuilder &builder, OperationState &result,
                           Type resultType, Value src,
                           ArrayRef<ReassociationIndices> reassociation,

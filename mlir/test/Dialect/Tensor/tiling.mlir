@@ -716,3 +716,21 @@ module attributes {transform.with_named_sequence} {
       transform.yield
   }
 }
+
+// -----
+
+// CHECK: func.func @static_expand_shape_single_group
+// CHECK:   blah
+
+func.func @perfect_NPQK_to_NKPQk(%source: tensor<35xf32>) -> tensor<5x7xf32> {
+  %0 = tensor.expand_shape %source [[0, 1]] output_shape [5, 7] : tensor<35xf32> into tensor<5x7xf32>
+  return %0 : tensor<5x7xf32>
+}
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%arg1: !transform.any_op {transform.readonly}) {
+      %0 = transform.structured.match ops{["tensor.expand_shape"]} in %arg1 : (!transform.any_op) -> !transform.any_op
+      %1, %loops:2 = transform.structured.tile_using_for %0 tile_sizes [1, 7] : (!transform.any_op) -> (!transform.any_op, !transform.any_op, !transform.any_op)
+      transform.yield
+  }
+}

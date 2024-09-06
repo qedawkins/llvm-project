@@ -1166,6 +1166,9 @@ def Tensor_ExpandShapeOp : Tensor_ReassociativeReshapeOp<"expand_shape"> {
         OpBuilder &b, Location loc, RankedTensorType expandedType,
         ArrayRef<ReassociationIndices> reassociation,
         ArrayRef<OpFoldResult> inputShape);
+
+    // Return a list of the mixed static/dynamic output shape.
+    SmallVector<OpFoldResult> getMixedOutputShape();
   }];
 
   let hasVerifier = 1;

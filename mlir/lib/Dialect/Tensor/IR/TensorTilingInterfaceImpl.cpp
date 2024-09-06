@@ -16,13 +16,162 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Interfaces/ValueBoundsOpInterface.h"
+#include "llvm/Support/LogicalResult.h"
 
 using namespace mlir;
 using namespace mlir::tensor;
 
 namespace {
+
+struct ExpandShapeOpTiling
+    : public TilingInterface::ExternalModel<ExpandShapeOpTiling,
+                                            ExpandShapeOp> {
+
+  SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
+    auto expandShapeOp = cast<ExpandShapeOp>(op);
+    SmallVector<utils::IteratorType> iteratorTypes(
+        expandShapeOp.getStaticOutputShape().size(),
+        utils::IteratorType::parallel);
+    return iteratorTypes;
+  }
+
+  SmallVector<Range> getIterationDomain(Operation *op, OpBuilder &b) const {
+    SmallVector<OpFoldResult> outputShape =
+        cast<ExpandShapeOp>(op).getMixedOutputShape();
+    OpFoldResult zero = b.getIndexAttr(0);
+    OpFoldResult one = b.getIndexAttr(1);
+    // Initialize all the ranges to {zero, one, one}. All the `ub`s are
+    // overwritten.
+    SmallVector<Range> loopRanges(outputShape.size(), {zero, one, one});
+    for (const auto [id, size] : enumerate(outputShape))
+      loopRanges[id].size = size;
+    return loopRanges;
+  }
+
+  FailureOr<TilingResult>
+  getTiledImplementation(Operation *op, OpBuilder &b,
+                         ArrayRef<OpFoldResult> offsets,
+                         ArrayRef<OpFoldResult> sizes) const {
+    auto expandShapeOp = cast<ExpandShapeOp>(op);
+
+    // Helper variables and function for accumulating the new offset and length
+    // values.
+    Location loc = expandShapeOp->getLoc();
+    AffineExpr d0, d1, d2;
+    bindDims(b.getContext(), d0, d1, d2);
+    // Multiply two integers.
+    auto mul = [&](OpFoldResult v1, OpFoldResult v2) {
+      auto mulMap = AffineMap::get(2, 0, {d0 * d1});
+      return affine::makeComposedFoldedAffineApply(b, loc, mulMap, {v1, v2});
+    };
+    auto mulAdd = [&](OpFoldResult v1, OpFoldResult v2, OpFoldResult v3) {
+      auto mulMap = AffineMap::get(3, 0, {d0 * d1 + d2});
+      return affine::makeComposedFoldedAffineApply(b, loc, mulMap,
+                                                   {v1, v2, v3});
+    };
+
+    SmallVector<OpFoldResult> outputShape = expandShapeOp.getMixedOutputShape();
+
+    // Compute new offsets, lengths, and strides.
+    SmallVector<OpFoldResult> newOffsets, newLengths, newStrides;
+
+    auto isZeroOffsetAndFullSize =
+        [](OpFoldResult offset, OpFoldResult sliceSize, OpFoldResult size) {
+          if (!isConstantIntValue(offset, 0))
+            return false;
+          FailureOr<bool> maybeEqual =
+              ValueBoundsConstraintSet::areEqual(sliceSize, size);
+          return llvm::succeeded(maybeEqual) && maybeEqual.value();
+        };
+
+    for (const ReassociationIndices &indices :
+         expandShapeOp.getReassociationIndices()) {
+      OpFoldResult newOffset = b.getIndexAttr(0);
+      OpFoldResult newSize = b.getIndexAttr(1);
+
+      int64_t i = 0;
+      int64_t e = indices.size();
+      for (; i < e; ++i) {
+        int64_t expandedDim = indices[i];
+        if (!isConstantIntValue(sizes[expandedDim], 1))
+          break;
+
+        newOffset = mulAdd(newOffset, sizes[expandedDim], offsets[expandedDim]);
+      }
+
+      if (i != e) {
+        int64_t expandedDim = indices[i];
+        newOffset = mulAdd(newOffset, sizes[expandedDim], offsets[expandedDim]);
+        newSize = sizes[expandedDim];
+        i++;
+      }
+
+      for (; i < e; ++i) {
+        int64_t expandedDim = indices[i];
+        OpFoldResult offset = offsets[expandedDim];
+        OpFoldResult fullSize = outputShape[expandedDim];
+        if (!isZeroOffsetAndFullSize(offset, sizes[expandedDim], fullSize))
+          failure();
+
+        newOffset = mul(newOffset, offset);
+        newSize = mul(newSize, fullSize);
+      }
+
+      newOffsets.push_back(newOffset);
+      newLengths.push_back(newSize);
+
+      // Only unit stride supported.
+      newStrides.push_back(b.getIndexAttr(1));
+    }
+
+    // The shape of the result can be obtained from the sizes passed in.
+    SmallVector<Value> dynDims;
+    SmallVector<int64_t> shape;
+    dispatchIndexOpFoldResults(sizes, dynDims, shape);
+    RankedTensorType resultType = RankedTensorType::get(
+        shape, expandShapeOp.getResultType().getElementType());
+
+    // Create a new ExtractSliceOp and ExpandShapeOp.
+    Value newSliceOp = b.create<tensor::ExtractSliceOp>(
+        loc, expandShapeOp.getSrc(), newOffsets, newLengths, newStrides);
+    auto newExpandShapeOp = b.create<tensor::ExpandShapeOp>(
+        loc, resultType, newSliceOp, expandShapeOp.getReassociationIndices(),
+        sizes);
+
+    return TilingResult{{newExpandShapeOp}, {newExpandShapeOp.getResult()}};
+  }
+
+  LogicalResult
+  getResultTilePosition(Operation *op, OpBuilder &b, unsigned resultNumber,
+                        ArrayRef<OpFoldResult> offsets,
+                        ArrayRef<OpFoldResult> sizes,
+                        SmallVector<OpFoldResult> &resultOffsets,
+                        SmallVector<OpFoldResult> &resultSizes) const {
+    resultOffsets.assign(offsets.begin(), offsets.end());
+    resultSizes.assign(sizes.begin(), sizes.end());
+    return success();
+  }
+
+  LogicalResult getIterationDomainTileFromResultTile(
+      Operation *op, OpBuilder &b, unsigned resultNumber,
+      ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
+      SmallVectorImpl<OpFoldResult> &iterDomainOffsets,
+      SmallVectorImpl<OpFoldResult> &iterDomainSizes) const {
+    iterDomainOffsets.assign(offsets.begin(), offsets.end());
+    iterDomainSizes.assign(sizes.begin(), sizes.end());
+    return success();
+  }
+
+  FailureOr<TilingResult>
+  generateResultTileValue(Operation *op, OpBuilder &b, unsigned resultNumber,
+                          ArrayRef<OpFoldResult> offsets,
+                          ArrayRef<OpFoldResult> sizes) const {
+    return getTiledImplementation(op, b, offsets, sizes);
+  }
+};
 
 struct PadOpTiling : public TilingInterface::ExternalModel<PadOpTiling, PadOp> {
 
@@ -916,6 +1065,7 @@ FailureOr<TilingResult> tensor::bubbleUpPadSlice(OpBuilder &b,
 void mlir::tensor::registerTilingInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, TensorDialect *dialect) {
+    tensor::ExpandShapeOp::attachInterface<ExpandShapeOpTiling>(*ctx);
     tensor::PadOp::attachInterface<PadOpTiling>(*ctx);
     tensor::PackOp::attachInterface<PackOpTiling>(*ctx);
     tensor::UnPackOp::attachInterface<UnPackOpTiling>(*ctx);
