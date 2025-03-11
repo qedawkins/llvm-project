@@ -15,7 +15,7 @@ include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferIntRangeInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
-include "mlir/Interfaces/ParallelCombiningOpInterface.td"
+include "mlir/Interfaces/ParallelCombiningInterfaces.td"
 include "mlir/Interfaces/ShapedOpInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/TilingInterface.td"
@@ -1473,6 +1473,8 @@ def Tensor_PadOp : Tensor_Op<"pad", [
 def Tensor_ParallelInsertSliceOp : Tensor_Op<"parallel_insert_slice", [
        AttrSizedOperandSegments,
        OffsetSizeAndStrideOpInterface,
+       DeclareOpInterfaceMethods<InParallelOpInterface,
+          ["getUpdatedDestinations", "getIteratingParent"]>,
        // TODO: Cannot use an interface here atm, verify this manually for now.
        // HasParent<"ParallelCombiningOpInterface">
   ]> {

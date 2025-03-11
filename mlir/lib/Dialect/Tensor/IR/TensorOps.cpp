@@ -2839,7 +2839,8 @@ public:
       // is that the insertion point is just before the ParallelCombiningOp in
       // the parallel case.
       if (std::is_same<InsertOpTy, ParallelInsertSliceOp>::value)
-        rewriter.setInsertionPoint(insertSliceOp->getParentOp());
+        if (isa<ParallelCombiningOpInterface>(insertSliceOp->getParentOp()))
+          rewriter.setInsertionPoint(insertSliceOp->getParentOp());
       toInsert = rewriter.create<tensor::CastOp>(insertSliceOp.getLoc(),
                                                  sourceType, toInsert);
     }
@@ -3008,7 +3009,8 @@ struct InsertSliceOpSourceCastInserter final
     // that the insertion point is just before the ParallelCombiningOp in the
     // parallel case.
     if (std::is_same<InsertOpTy, ParallelInsertSliceOp>::value)
-      rewriter.setInsertionPoint(insertSliceOp->getParentOp());
+      if (isa<ParallelCombiningOpInterface>(insertSliceOp->getParentOp()))
+        rewriter.setInsertionPoint(insertSliceOp->getParentOp());
     Value cast = rewriter.create<tensor::CastOp>(
         insertSliceOp.getLoc(), newSrcType, insertSliceOp.getSource());
     rewriter.replaceOpWithNewOp<InsertOpTy>(
@@ -3688,15 +3690,8 @@ OpFoldResult PadOp::fold(FoldAdaptor) {
 //===----------------------------------------------------------------------===//
 
 OpResult ParallelInsertSliceOp::getTiedOpResult() {
-  ParallelCombiningOpInterface parallelCombiningParent =
-      getParallelCombiningParent();
-  for (const auto &it :
-       llvm::enumerate(parallelCombiningParent.getYieldingOps())) {
-    Operation &nextOp = it.value();
-    if (&nextOp == getOperation())
-      return parallelCombiningParent.getParentResult(it.index());
-  }
-  llvm_unreachable("ParallelInsertSliceOp no tied OpResult found");
+  auto parent = cast<ParallelIterationOpInterface>(getIteratingParent());
+  return parent.getTiedOpResult(cast<BlockArgument>(getDest()));
 }
 
 // Build a ParallelInsertSliceOp with mixed static and dynamic entries.
@@ -3743,10 +3738,6 @@ void ParallelInsertSliceOp::build(OpBuilder &b, OperationState &result,
 }
 
 LogicalResult ParallelInsertSliceOp::verify() {
-  if (!isa<ParallelCombiningOpInterface>(getOperation()->getParentOp()))
-    return this->emitError("expected ParallelCombiningOpInterface parent, got:")
-           << *(getOperation()->getParentOp());
-
   RankedTensorType expectedType;
   SliceVerificationResult result =
       verifyInsertSliceOp(getSourceType(), getDestType(), getStaticOffsets(),
@@ -3763,6 +3754,14 @@ void ParallelInsertSliceOp::getCanonicalizationPatterns(
 
 llvm::SmallBitVector ParallelInsertSliceOp::getDroppedDims() {
   return ::getDroppedDims(getSourceType().getShape(), getMixedSizes());
+}
+
+Operation *ParallelInsertSliceOp::getIteratingParent() {
+  return cast<BlockArgument>(getDest()).getOwner()->getParentOp();
+}
+
+MutableOperandRange ParallelInsertSliceOp::getUpdatedDestinations() {
+  return getDestMutable();
 }
 
 //===----------------------------------------------------------------------===//

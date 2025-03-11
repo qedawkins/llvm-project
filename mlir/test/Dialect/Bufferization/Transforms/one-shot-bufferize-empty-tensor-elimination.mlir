@@ -191,6 +191,49 @@ func.func @parallel_insert_slice(
 
 // -----
 
+//      CHECK: func @multiple_parallel_insert_slice(
+// CHECK-SAME:   %[[FUNC_ARG:[0-9a-zA-Z]*]]: memref<?xf32>
+// CHECK-SAME:   %[[sz:[0-9a-zA-Z]*]]: index
+func.func @multiple_parallel_insert_slice(
+  %t: tensor<?xf32> {bufferization.buffer_layout = affine_map<(d0) -> (d0)>, bufferization.writable = true},
+  %sz: index)
+    -> (tensor<?xf32>)
+{
+  %f0 = arith.constant 0.0: f32
+  %f1 = arith.constant 1.0: f32
+  %c512 = arith.constant 512 : index
+  %c256 = arith.constant 256 : index
+
+  %r1 = scf.forall (%iv) in (%c512) shared_outs(%o = %t) -> (tensor<?xf32>) {
+    // tensor.empty itself does not alloc but forwards to the insert_slice.
+    // EmptyTensorOpElimination replaces the tensor.empty with an inplace
+    // extract_slice.
+
+    %cond = arith.cmpi sle, %iv, %c256 : index
+
+    // CHECK: scf.if
+    scf.if %cond {
+      // CHECK: %[[T_SUBVIEW:.*]] =  memref.subview %[[FUNC_ARG]][42] [%[[sz]]] [1]
+      // CHECK: linalg.fill ins({{.*}} : f32) outs(%[[T_SUBVIEW]] : memref<?xf32
+      %a0 = tensor.empty(%sz) : tensor<?xf32>
+      %fill0 = linalg.fill ins(%f0 : f32) outs(%a0 : tensor<?xf32>) -> tensor<?xf32>
+      tensor.parallel_insert_slice %fill0 into %o[42][%sz][1]: tensor<?xf32> into tensor<?xf32>
+
+    // CHECK: } else {
+    } else {
+      // CHECK: %[[T_SUBVIEW:.*]] =  memref.subview %[[FUNC_ARG]][420] [%[[sz]]] [1]
+      // CHECK: linalg.fill ins({{.*}} : f32) outs(%[[T_SUBVIEW]] : memref<?xf32
+      %a1 = tensor.empty(%sz) : tensor<?xf32>
+      %fill1 = linalg.fill ins(%f1 : f32) outs(%a1 : tensor<?xf32>) -> tensor<?xf32>
+      tensor.parallel_insert_slice %fill1 into %o[420][%sz][1]: tensor<?xf32> into tensor<?xf32>
+    }
+  }
+
+  return %r1: tensor<?xf32>
+}
+
+// -----
+
 // CHECK-LABEL: func @eleminate_multiple_ops(
 //  CHECK-SAME:   %[[FUNC_ARG:[0-9a-zA-Z]*]]: memref<?xf32>
 //  CHECK-SAME:   %[[sz:[0-9a-zA-Z]*]]: index

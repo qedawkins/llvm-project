@@ -37,6 +37,7 @@
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Interfaces/ParallelCombiningInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/TypeID.h"
@@ -3760,8 +3761,10 @@ DiagnosedSilenceableFailure doit(RewriterBase &rewriter, OpTy target,
   // If we are inside an InParallel region, temporarily set the insertion point
   // outside: only tensor.parallel_insert_slice ops are allowed in there.
   if constexpr (std::is_same_v<OpTy, tensor::ParallelInsertSliceOp>) {
-    rewriter.setInsertionPoint(
-        target->template getParentOfType<scf::InParallelOp>());
+    if (auto combiningParent =
+            dyn_cast<ParallelCombiningOpInterface>(target->getParentOp())) {
+      rewriter.setInsertionPoint(target->getParentOp());
+    }
   }
 
   Value extracted = rewriter.create<tensor::ExtractSliceOp>(

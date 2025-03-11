@@ -746,8 +746,12 @@ struct RankReducedInsertSliceOp : public OpRewritePattern<InsertOpTy> {
       // The only difference between InsertSliceOp and ParallelInsertSliceOp
       // is the insertion point is just before the ParallelCombiningOp in the
       // parallel case.
-      if (std::is_same<InsertOpTy, tensor::ParallelInsertSliceOp>::value)
-        rewriter.setInsertionPoint(insertSliceOp->getParentOp());
+      if (std::is_same<InsertOpTy, tensor::ParallelInsertSliceOp>::value) {
+        if (auto combiningParent = dyn_cast<ParallelCombiningOpInterface>(
+                insertSliceOp->getParentOp())) {
+          rewriter.setInsertionPoint(insertSliceOp->getParentOp());
+        }
+      }
       reshapedSource = rewriter.create<tensor::CollapseShapeOp>(
           loc, insertSliceOp.getSource(), *reassociation);
     }

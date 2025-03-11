@@ -1409,8 +1409,8 @@ td_library(
 )
 
 td_library(
-    name = "ParallelCombiningOpInterfaceTdFiles",
-    srcs = ["include/mlir/Interfaces/ParallelCombiningOpInterface.td"],
+    name = "ParallelCombiningInterfacesTdFiles",
+    srcs = ["include/mlir/Interfaces/ParallelCombiningInterfaces.td"],
     includes = ["include"],
     deps = [":OpBaseTdFiles"],
 )
@@ -2875,7 +2875,7 @@ td_library(
         ":DestinationStyleOpInterfaceTdFiles",
         ":InferTypeOpInterfaceTdFiles",
         ":LoopLikeInterfaceTdFiles",
-        ":ParallelCombiningOpInterfaceTdFiles",
+        ":ParallelCombiningInterfacesTdFiles",
         ":SideEffectInterfacesTdFiles",
         ":ViewLikeInterfaceTdFiles",
     ],
@@ -4518,7 +4518,7 @@ cc_library(
         ":InliningUtils",
         ":LoopLikeInterface",
         ":MemRefDialect",
-        ":ParallelCombiningOpInterface",
+        ":ParallelCombiningInterfaces",
         ":SCFDeviceMappingInterfacesIncGen",
         ":SCFIncGen",
         ":SideEffectInterfaces",
@@ -4634,13 +4634,13 @@ cc_library(
 )
 
 cc_library(
-    name = "ParallelCombiningOpInterface",
-    srcs = ["lib/Interfaces/ParallelCombiningOpInterface.cpp"],
-    hdrs = ["include/mlir/Interfaces/ParallelCombiningOpInterface.h"],
+    name = "ParallelCombiningInterfaces",
+    srcs = ["lib/Interfaces/ParallelCombiningInterfaces.cpp"],
+    hdrs = ["include/mlir/Interfaces/ParallelCombiningInterfaces.h"],
     includes = ["include"],
     deps = [
         ":IR",
-        ":ParallelCombiningOpInterfaceIncGen",
+        ":ParallelCombiningInterfacesIncGen",
     ],
 )
 
@@ -7835,7 +7835,7 @@ td_library(
         ":InferIntRangeInterfaceTdFiles",
         ":InferTypeOpInterfaceTdFiles",
         ":OpBaseTdFiles",
-        ":ParallelCombiningOpInterfaceTdFiles",
+        ":ParallelCombiningInterfacesTdFiles",
         ":ShapedOpInterfacesTdFiles",
         ":SideEffectInterfacesTdFiles",
         ":TilingInterfaceTdFiles",
@@ -7904,7 +7904,7 @@ cc_library(
         ":InferTypeOpInterface",
         ":InliningUtils",
         ":LoopLikeInterface",
-        ":ParallelCombiningOpInterface",
+        ":ParallelCombiningInterfaces",
         ":RelayoutOpInterface",
         ":ShapedOpInterfaces",
         ":SideEffectInterfaces",
@@ -8336,20 +8336,20 @@ gentbl_cc_library(
 )
 
 gentbl_cc_library(
-    name = "ParallelCombiningOpInterfaceIncGen",
+    name = "ParallelCombiningInterfacesIncGen",
     tbl_outs = [
         (
             ["-gen-op-interface-decls"],
-            "include/mlir/Interfaces/ParallelCombiningOpInterface.h.inc",
+            "include/mlir/Interfaces/ParallelCombiningInterfaces.h.inc",
         ),
         (
             ["-gen-op-interface-defs"],
-            "include/mlir/Interfaces/ParallelCombiningOpInterface.cpp.inc",
+            "include/mlir/Interfaces/ParallelCombiningInterfaces.cpp.inc",
         ),
     ],
     tblgen = ":mlir-tblgen",
-    td_file = "include/mlir/Interfaces/ParallelCombiningOpInterface.td",
-    deps = [":ParallelCombiningOpInterfaceTdFiles"],
+    td_file = "include/mlir/Interfaces/ParallelCombiningInterfaces.td",
+    deps = [":ParallelCombiningInterfacesTdFiles"],
 )
 
 gentbl_cc_library(
